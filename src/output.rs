@@ -65,9 +65,10 @@ pub fn print_job_log(
                 }).collect::<Vec<_>>()
             }),
             "logs": logs.iter().map(|(name, content)| {
+                let filtered = filter_log_lines(content, grep);
                 serde_json::json!({
                     "step": name,
-                    "output": content,
+                    "output": filtered,
                 })
             }).collect::<Vec<_>>(),
         });
