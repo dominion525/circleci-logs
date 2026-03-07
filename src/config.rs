@@ -47,15 +47,11 @@ impl Config {
             })
             .transpose()?;
 
-        let token = resolve_token(
-            env_token,
-            parsed.as_ref().and_then(|c| c.token.clone()),
-        )?;
+        let token = resolve_token(env_token, parsed.as_ref().and_then(|c| c.token.clone()))?;
 
-        let project_str = parsed
-            .as_ref()
-            .and_then(|c| c.project.clone())
-            .context("Missing 'project' field. Set it in .circleci-logs.toml (e.g. github/org/repo)")?;
+        let project_str = parsed.as_ref().and_then(|c| c.project.clone()).context(
+            "Missing 'project' field. Set it in .circleci-logs.toml (e.g. github/org/repo)",
+        )?;
 
         let (vcs_type, org, repo) = parse_project(&project_str)?;
 
@@ -207,7 +203,11 @@ mod tests {
     fn load_full_config_from_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".circleci-logs.toml");
-        fs::write(&path, "token = \"my-token\"\nproject = \"github/myorg/myrepo\"\n").unwrap();
+        fs::write(
+            &path,
+            "token = \"my-token\"\nproject = \"github/myorg/myrepo\"\n",
+        )
+        .unwrap();
 
         let config = Config::from_file_and_token(Some(&path), None).unwrap();
         assert_eq!(config.token, "my-token");
@@ -220,7 +220,11 @@ mod tests {
     fn load_env_token_overrides_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".circleci-logs.toml");
-        fs::write(&path, "token = \"file-token\"\nproject = \"github/org/repo\"\n").unwrap();
+        fs::write(
+            &path,
+            "token = \"file-token\"\nproject = \"github/org/repo\"\n",
+        )
+        .unwrap();
 
         let config =
             Config::from_file_and_token(Some(&path), Some("env-token".to_string())).unwrap();
@@ -233,8 +237,7 @@ mod tests {
         let path = dir.path().join(".circleci-logs.toml");
         fs::write(&path, "project = \"github/org/repo\"\n").unwrap();
 
-        let config =
-            Config::from_file_and_token(Some(&path), Some("env-tok".to_string())).unwrap();
+        let config = Config::from_file_and_token(Some(&path), Some("env-tok".to_string())).unwrap();
         assert_eq!(config.token, "env-tok");
     }
 
@@ -270,8 +273,7 @@ mod tests {
 
     #[test]
     fn load_no_config_file() {
-        let err =
-            Config::from_file_and_token(None, Some("tok".to_string())).unwrap_err();
+        let err = Config::from_file_and_token(None, Some("tok".to_string())).unwrap_err();
         assert!(err.to_string().contains("Missing 'project' field"));
     }
 

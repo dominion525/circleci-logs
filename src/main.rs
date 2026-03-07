@@ -255,8 +255,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_step_logs_no_steps() {
-        let client =
-            CircleCiClient::with_base_url(test_config(), "http://unused:9999".to_string());
+        let client = CircleCiClient::with_base_url(test_config(), "http://unused:9999".to_string());
         let detail = make_detail(None);
 
         let logs = fetch_step_logs(&client, &detail, false).await;
@@ -288,8 +287,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_step_logs_no_output_url() {
-        let client =
-            CircleCiClient::with_base_url(test_config(), "http://unused:9999".to_string());
+        let client = CircleCiClient::with_base_url(test_config(), "http://unused:9999".to_string());
         let detail = make_detail(Some(vec![make_step(
             "step1",
             vec![make_action("a1", "success", None)],
@@ -347,8 +345,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_job_log_invalid_grep() {
-        let client =
-            CircleCiClient::with_base_url(test_config(), "http://unused:9999".to_string());
+        let client = CircleCiClient::with_base_url(test_config(), "http://unused:9999".to_string());
 
         let result = run_job_log(&client, 42, false, Some("[invalid"), false).await;
         let err = result.unwrap_err();
