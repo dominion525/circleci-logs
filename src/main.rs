@@ -34,11 +34,11 @@ struct Cli {
     #[arg(long)]
     json: bool,
 
-    /// Show only failed steps (use with -j)
+    /// Show only failed steps (requires -j)
     #[arg(long)]
     errors_only: bool,
 
-    /// Filter log lines by regex pattern (use with -j)
+    /// Filter log lines by regex pattern (requires -j)
     #[arg(long)]
     grep: Option<String>,
 }
@@ -46,6 +46,15 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if cli.job_number.is_none() && (cli.errors_only || cli.grep.is_some()) {
+        let flag = if cli.errors_only {
+            "--errors-only"
+        } else {
+            "--grep"
+        };
+        anyhow::bail!("{} can only be used with -j/--jid", flag);
+    }
 
     let config = Config::load()?;
     let client = CircleCiClient::new(config);
