@@ -10,12 +10,23 @@ struct ConfigFile {
     project: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     pub token: String,
     pub vcs_type: String,
     pub org: String,
     pub repo: String,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("token", &"***")
+            .field("vcs_type", &self.vcs_type)
+            .field("org", &self.org)
+            .field("repo", &self.repo)
+            .finish()
+    }
 }
 
 impl Config {
@@ -145,5 +156,19 @@ mod tests {
     #[test]
     fn resolve_token_both_none() {
         assert!(resolve_token(None, None).is_err());
+    }
+
+    #[test]
+    fn debug_redacts_token() {
+        let config = Config {
+            token: "super-secret-token".to_string(),
+            vcs_type: "github".to_string(),
+            org: "myorg".to_string(),
+            repo: "myrepo".to_string(),
+        };
+        let debug = format!("{:?}", config);
+        assert!(!debug.contains("super-secret-token"));
+        assert!(debug.contains("***"));
+        assert!(debug.contains("myorg"));
     }
 }
