@@ -102,7 +102,13 @@ async fn run_job_log(
 
     let mut logs = Vec::new();
     for (step_name, url) in &log_futures {
-        let content = client.fetch_action_output(url).await.unwrap_or_default();
+        let content = match client.fetch_action_output(url).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Warning: failed to fetch log for '{}': {}", step_name, e);
+                String::new()
+            }
+        };
         logs.push((step_name.clone(), content));
     }
 
