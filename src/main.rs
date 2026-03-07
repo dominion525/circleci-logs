@@ -80,8 +80,18 @@ async fn run_job_log(
         .transpose()?;
 
     let detail = client.fetch_job_detail(job_number).await?;
+    let logs = fetch_step_logs(client, &detail, errors_only).await;
 
-    let mut log_futures = Vec::new();
+    output::print_job_log(&detail, &logs, errors_only, grep_re.as_ref(), json)?;
+    Ok(())
+}
+
+async fn fetch_step_logs(
+    client: &CircleCiClient,
+    detail: &models::JobDetail,
+    errors_only: bool,
+) -> Vec<(String, String)> {
+    let mut targets = Vec::new();
     if let Some(ref steps) = detail.steps {
         for step in steps {
             for action in &step.actions {
@@ -89,16 +99,14 @@ async fn run_job_log(
                     continue;
                 }
                 if let Some(ref url) = action.output_url {
-                    let step_name = step.name.clone();
-                    let url = url.clone();
-                    log_futures.push((step_name, url));
+                    targets.push((step.name.clone(), url.clone()));
                 }
             }
         }
     }
 
     let mut logs = Vec::new();
-    for (step_name, url) in &log_futures {
+    for (step_name, url) in &targets {
         let content = match client.fetch_action_output(url).await {
             Ok(c) => c,
             Err(e) => {
@@ -108,9 +116,7 @@ async fn run_job_log(
         };
         logs.push((step_name.clone(), content));
     }
-
-    output::print_job_log(&detail, &logs, errors_only, grep_re.as_ref(), json)?;
-    Ok(())
+    logs
 }
 
 async fn run_workflow_jobs(client: &CircleCiClient, workflow_id: &str, json: bool) -> Result<()> {
