@@ -25,8 +25,8 @@ impl CircleCiClient {
         }
     }
 
-    fn auth_header(&self) -> (&str, String) {
-        ("Circle-Token", self.config.token.clone())
+    fn auth_header(&self) -> (&str, &str) {
+        ("Circle-Token", &self.config.token)
     }
 
     async fn check_response(resp: reqwest::Response) -> Result<reqwest::Response> {
