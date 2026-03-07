@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 
 // --- v1.1 API: Job detail ---
@@ -24,6 +22,7 @@ pub struct Step {
     pub actions: Vec<Action>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct Action {
     pub name: String,
@@ -34,6 +33,7 @@ pub struct Action {
     pub index: Option<u32>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct ActionOutput {
     pub message: String,
@@ -69,6 +69,7 @@ pub struct PipelinesResponse {
     pub next_page_token: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct Pipeline {
     pub id: String,
