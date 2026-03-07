@@ -74,7 +74,10 @@ impl CircleCiClient {
             .await
             .context("Failed to fetch action output")?;
         let resp = Self::check_response(resp).await?;
-        let outputs: Vec<ActionOutput> = resp.json().await.unwrap_or_default();
+        let outputs: Vec<ActionOutput> = resp
+            .json()
+            .await
+            .context("Failed to parse action output")?;
         Ok(aggregate_action_outputs(outputs))
     }
 

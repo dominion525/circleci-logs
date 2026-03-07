@@ -39,3 +39,15 @@
 
 - [x] 設定ファイルのパーミッション未検証 (Unix)
   - トークンを含む .circleci-logs.toml が誰でも読める状態でも警告なし
+
+## Round 2（Codex レビュー指摘）
+
+- [x] api.rs:77 — JSON パース失敗の握りつぶし
+  - `fetch_action_output` で `resp.json().await.unwrap_or_default()` を使用
+  - パース失敗時に空ログとして扱われ、ユーザーは「ログが無い」のか「取得失敗」なのか判別不能
+  - `.context(...)` でエラーを返し、呼び出し側の警告経路に乗せる
+
+- [ ] output.rs:67-70 — JSON 出力時に --grep フィルタが無効化される
+  - `--jid ... --json --grep ...` の組み合わせでフィルタが効かない
+  - テキスト出力では grep が効くが、JSON 分岐では生ログがそのまま出力される
+  - JSON 分岐でも `filter_log_lines` を適用するか、組み合わせを明示的にエラーにする
