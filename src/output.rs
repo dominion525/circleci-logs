@@ -42,13 +42,16 @@ fn format_duration(millis: Option<u64>) -> String {
 fn build_job_log_json(
     detail: &JobDetail,
     logs: &[(String, String)],
+    errors_only: bool,
     grep: Option<&Regex>,
 ) -> serde_json::Value {
     serde_json::json!({
         "build_num": detail.build_num,
         "status": detail.status,
         "steps": detail.steps.as_ref().map(|steps| {
-            steps.iter().map(|step| {
+            steps.iter().filter(|step| {
+                !errors_only || step.actions.iter().any(|a| a.status != "success")
+            }).map(|step| {
                 serde_json::json!({
                     "name": step.name,
                     "actions": step.actions.iter().map(|a| {
@@ -79,7 +82,7 @@ pub fn print_job_log(
     json: bool,
 ) -> Result<()> {
     if json {
-        let output = build_job_log_json(detail, logs, grep);
+        let output = build_job_log_json(detail, logs, errors_only, grep);
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
@@ -292,7 +295,7 @@ mod tests {
             Some(42),
         );
         let logs = vec![("build".to_string(), "output line".to_string())];
-        let val = build_job_log_json(&detail, &logs, None);
+        let val = build_job_log_json(&detail, &logs, false, None);
 
         assert_eq!(val["build_num"], 42);
         assert_eq!(val["status"], "success");
@@ -309,15 +312,33 @@ mod tests {
     #[test]
     fn build_job_log_json_steps_none() {
         let detail = make_detail(None, Some("failed"), Some(1));
-        let val = build_job_log_json(&detail, &[], None);
+        let val = build_job_log_json(&detail, &[], false, None);
         assert!(val["steps"].is_null());
     }
 
     #[test]
     fn build_job_log_json_empty_logs() {
         let detail = make_detail(None, None, None);
-        let val = build_job_log_json(&detail, &[], None);
+        let val = build_job_log_json(&detail, &[], false, None);
         assert_eq!(val["logs"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn build_job_log_json_errors_only() {
+        let detail = make_detail(
+            Some(vec![
+                make_step("build", vec![make_action("compile", "success", Some(3000))]),
+                make_step("test", vec![make_action("run tests", "failed", Some(5000))]),
+            ]),
+            Some("failed"),
+            Some(99),
+        );
+        let logs = vec![];
+        let val = build_job_log_json(&detail, &logs, true, None);
+
+        let steps = val["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0]["name"], "test");
     }
 
     #[test]
@@ -325,7 +346,7 @@ mod tests {
         let detail = make_detail(None, None, None);
         let logs = vec![("step1".to_string(), "ok line\nerror here\nfine".to_string())];
         let re = Regex::new("error").unwrap();
-        let val = build_job_log_json(&detail, &logs, Some(&re));
+        let val = build_job_log_json(&detail, &logs, false, Some(&re));
         assert_eq!(val["logs"][0]["output"], "error here");
     }
 
