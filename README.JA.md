@@ -23,15 +23,29 @@ export CIRCLE_TOKEN="your-circleci-token"
 circleci-logs -j 12345
 ```
 
-GitHub または Bitbucket の git リポジトリ内で実行すれば、プロジェクトは自動検出されます。設定ファイルは不要です。
+GitHub または Bitbucket の git リポジトリ内で実行すれば、プロジェクトは自動検出されます。
+`CIRCLE_TOKEN` は [CircleCI の Personal API Tokens](https://app.circleci.com/settings/user/tokens) から発行できます。
 
 ## 使い方
 
+CircleCI では以下の階層でビルドが管理されています。
+
 ```
-circleci-logs [OPTIONS] <--jid <JOB_NUMBER>|--wid <WORKFLOW_ID>|--pid <PIPELINE_NUMBER>>
+Pipeline (123)         1回のgit pushや定期実行で起動される単位
+ └─ Workflow (uuid)    ジョブの実行順序・依存関係を定義
+     └─ Job (456)      個々の実行環境で動くステップの集まり
+         └─ Step       実際のコマンド実行。ログはここに残る
 ```
 
-3 つのモードがあり、いずれか 1 つを指定します。
+本ツールはパイプライン・ワークフロー・ジョブの各階層に対応する 3 つのモードがあり、いずれか 1 つを指定します。
+
+| 見たいもの | コマンド | ID の場所（CircleCI Web UI） |
+|---|---|---|
+| ジョブのログ | `circleci-logs -j <番号>` | URL 末尾の `.../jobs/456` |
+| ワークフローのジョブ一覧 | `circleci-logs -w <UUID>` | URL 内の `.../workflows/<UUID>` |
+| パイプラインのワークフロー一覧 | `circleci-logs -p <番号>` | URL 末尾の `.../pipelines/.../123` |
+
+全オプションは `circleci-logs --help` で確認できます。
 
 ### ジョブログの取得 (`-j` / `--jid`)
 
@@ -41,10 +55,33 @@ circleci-logs [OPTIONS] <--jid <JOB_NUMBER>|--wid <WORKFLOW_ID>|--pid <PIPELINE_
 circleci-logs -j <JOB_NUMBER>
 ```
 
+出力例:
+
+```
+$ circleci-logs -j 4504
+Workflow: build-and-test  Job: test
+Status: failed
+
+[success] Spin up environment (2s)
+[success] Checkout code (1s)
+[failed]  Run tests (15s)
+
+--- Run tests ---
+FAILED src/app.test.ts:42
+  Expected: 200
+  Received: 500
+```
+
 オプション:
 
 - `--errors-only` — 失敗したステップのみ表示
+  ```
+  circleci-logs -j 4504 --errors-only
+  ```
 - `--grep <PATTERN>` — 正規表現でログ行をフィルタ
+  ```
+  circleci-logs -j 4504 --grep "error"
+  ```
 - `--json` — JSON 形式で出力
 
 ### ワークフローのジョブ一覧 (`-w` / `--wid`)
@@ -53,6 +90,19 @@ circleci-logs -j <JOB_NUMBER>
 
 ```
 circleci-logs -w <WORKFLOW_ID>
+```
+
+出力例:
+
+```
+$ circleci-logs -w a1b2c3d4-5678-90ab-cdef-1234567890ab
+JOB#     NAME                           STATUS       STARTED              STOPPED
+------------------------------------------------------------------------------------------
+4501     lint                           success      2025-01-15T10:00:05Z 2025-01-15T10:00:38Z
+4502     build                          success      2025-01-15T10:00:06Z 2025-01-15T10:00:30Z
+4503     unit-test                      success      2025-01-15T10:00:32Z 2025-01-15T10:04:15Z
+4504     integration-test               failed       2025-01-15T10:04:18Z 2025-01-15T10:08:42Z
+4505     deploy                         canceled     -                    -
 ```
 
 オプション:
@@ -67,35 +117,19 @@ circleci-logs -w <WORKFLOW_ID>
 circleci-logs -p <PIPELINE_NUMBER>
 ```
 
+出力例:
+
+```
+$ circleci-logs -p 142
+WORKFLOW ID                            NAME                      STATUS       CREATED              STOPPED
+-------------------------------------------------------------------------------------------------------------------
+a1b2c3d4-5678-90ab-cdef-1234567890ab   build-and-test            failed       2025-01-15T10:00:01Z 2025-01-15T10:08:42Z
+b2c3d4e5-6789-01bc-defa-234567890abc   deploy                    canceled     2025-01-15T10:00:01Z 2025-01-15T10:08:45Z
+```
+
 オプション:
 
 - `--json` — JSON 形式で出力
-
-### 使用例
-
-ジョブ 12345 のログを取得する:
-
-```
-circleci-logs -j 12345
-```
-
-失敗したステップのログだけを表示する:
-
-```
-circleci-logs -j 12345 --errors-only
-```
-
-ログから "error" を含む行だけを抽出する:
-
-```
-circleci-logs -j 12345 --grep "error"
-```
-
-ワークフローのジョブ一覧を JSON で取得する:
-
-```
-circleci-logs -w abc12345-def6-7890-abcd-ef1234567890 --json
-```
 
 ## プロジェクトの解決
 
@@ -139,10 +173,11 @@ token = "your-circleci-token"            # 省略可（環境変数を推奨）
 
 ### パーミッション
 
-トークンを設定ファイルに記載する場合は、パーミッションを制限してください。
+トークンを設定ファイルに記載する場合は、パーミッションを制限し、`.gitignore` に追加してください。
 
 ```
 chmod 600 .circleci-logs.toml
+echo '.circleci-logs.toml' >> .gitignore
 ```
 
 ## ライセンス
