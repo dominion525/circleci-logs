@@ -200,7 +200,7 @@ mod tests {
     fn test_config() -> Config {
         Config {
             token: "test-token".into(),
-            vcs_type: "github".into(),
+            vcs_type: "gh".into(),
             org: "test-org".into(),
             repo: "test-repo".into(),
         }
@@ -250,7 +250,7 @@ mod tests {
         });
 
         Mock::given(method("GET"))
-            .and(path("/api/v1.1/project/github/test-org/test-repo/42"))
+            .and(path("/api/v1.1/project/gh/test-org/test-repo/42"))
             .and(header("Circle-Token", "test-token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(&body))
             .expect(1)
@@ -269,7 +269,7 @@ mod tests {
         let client = CircleCiClient::with_base_url(test_config(), server.uri());
 
         Mock::given(method("GET"))
-            .and(path("/api/v1.1/project/github/test-org/test-repo/1"))
+            .and(path("/api/v1.1/project/gh/test-org/test-repo/1"))
             .respond_with(ResponseTemplate::new(401))
             .mount(&server)
             .await;
@@ -284,7 +284,7 @@ mod tests {
         let client = CircleCiClient::with_base_url(test_config(), server.uri());
 
         Mock::given(method("GET"))
-            .and(path("/api/v1.1/project/github/test-org/test-repo/999"))
+            .and(path("/api/v1.1/project/gh/test-org/test-repo/999"))
             .respond_with(ResponseTemplate::new(404))
             .mount(&server)
             .await;
@@ -299,7 +299,7 @@ mod tests {
         let client = CircleCiClient::with_base_url(test_config(), server.uri());
 
         Mock::given(method("GET"))
-            .and(path("/api/v1.1/project/github/test-org/test-repo/1"))
+            .and(path("/api/v1.1/project/gh/test-org/test-repo/1"))
             .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
             .mount(&server)
             .await;
@@ -413,7 +413,7 @@ mod tests {
 
         // Pipeline list (find_pipeline_uuid)
         Mock::given(method("GET"))
-            .and(path("/api/v2/project/github/test-org/test-repo/pipeline"))
+            .and(path("/api/v2/project/gh/test-org/test-repo/pipeline"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "items": [
                     {"id": "pipe-abc", "number": 42, "state": "created", "created_at": "2024-01-01T00:00:00Z"}
@@ -446,7 +446,7 @@ mod tests {
         let client = CircleCiClient::with_base_url(test_config(), server.uri());
 
         Mock::given(method("GET"))
-            .and(path("/api/v2/project/github/test-org/test-repo/pipeline"))
+            .and(path("/api/v2/project/gh/test-org/test-repo/pipeline"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "items": [
                     {"id": "pipe-other", "number": 99, "state": "created", "created_at": null}

@@ -115,22 +115,30 @@ fn resolve_token(env_token: Option<String>, file_token: Option<String>) -> Resul
         .context("Token not found. Set CIRCLE_TOKEN env var or 'token' in .circleci-logs.toml")
 }
 
+fn normalize_vcs_type(vcs: &str) -> Result<String> {
+    match vcs {
+        "gh" | "github" => Ok("gh".to_string()),
+        "bb" | "bitbucket" => Ok("bb".to_string()),
+        _ => bail!(
+            "Unknown VCS type '{}'. Use 'github' (or 'gh') or 'bitbucket' (or 'bb')",
+            vcs
+        ),
+    }
+}
+
 fn parse_project(project: &str) -> Result<(String, String, String)> {
     let parts: Vec<&str> = project.split('/').collect();
     if parts.len() != 3 {
         bail!("'project' must be in 'vcs_type/org/repo' format (e.g. github/myorg/myrepo)");
     }
-    Ok((
-        parts[0].to_string(),
-        parts[1].to_string(),
-        parts[2].to_string(),
-    ))
+    let vcs_type = normalize_vcs_type(parts[0])?;
+    Ok((vcs_type, parts[1].to_string(), parts[2].to_string()))
 }
 
 fn host_to_vcs_type(host: &str) -> Result<String> {
     match host {
-        "github.com" => Ok("github".to_string()),
-        "bitbucket.org" => Ok("bitbucket".to_string()),
+        "github.com" => Ok("gh".to_string()),
+        "bitbucket.org" => Ok("bb".to_string()),
         _ => bail!("Unsupported git host '{}'. Only github.com and bitbucket.org are supported", host),
     }
 }
@@ -200,11 +208,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_project_valid() {
+    fn parse_project_valid_github() {
         let (vcs, org, repo) = parse_project("github/myorg/myrepo").unwrap();
-        assert_eq!(vcs, "github");
+        assert_eq!(vcs, "gh");
         assert_eq!(org, "myorg");
         assert_eq!(repo, "myrepo");
+    }
+
+    #[test]
+    fn parse_project_valid_gh() {
+        let (vcs, org, repo) = parse_project("gh/myorg/myrepo").unwrap();
+        assert_eq!(vcs, "gh");
+        assert_eq!(org, "myorg");
+        assert_eq!(repo, "myrepo");
+    }
+
+    #[test]
+    fn parse_project_valid_bitbucket() {
+        let (vcs, org, repo) = parse_project("bitbucket/myorg/myrepo").unwrap();
+        assert_eq!(vcs, "bb");
+        assert_eq!(org, "myorg");
+        assert_eq!(repo, "myrepo");
+    }
+
+    #[test]
+    fn parse_project_valid_bb() {
+        let (vcs, org, repo) = parse_project("bb/myorg/myrepo").unwrap();
+        assert_eq!(vcs, "bb");
+        assert_eq!(org, "myorg");
+        assert_eq!(repo, "myrepo");
+    }
+
+    #[test]
+    fn parse_project_unknown_vcs() {
+        assert!(parse_project("gitlab/myorg/myrepo").is_err());
     }
 
     #[test]
@@ -226,11 +263,11 @@ mod tests {
     fn project_slug_format() {
         let config = Config {
             token: "tok".to_string(),
-            vcs_type: "github".to_string(),
+            vcs_type: "gh".to_string(),
             org: "myorg".to_string(),
             repo: "myrepo".to_string(),
         };
-        assert_eq!(config.project_slug(), "github/myorg/myrepo");
+        assert_eq!(config.project_slug(), "gh/myorg/myrepo");
     }
 
     #[test]
@@ -258,7 +295,7 @@ mod tests {
     fn debug_redacts_token() {
         let config = Config {
             token: "super-secret-token".to_string(),
-            vcs_type: "github".to_string(),
+            vcs_type: "gh".to_string(),
             org: "myorg".to_string(),
             repo: "myrepo".to_string(),
         };
@@ -282,7 +319,7 @@ mod tests {
 
         let config = Config::from_file_and_token(Some(&path), None).unwrap();
         assert_eq!(config.token, "my-token");
-        assert_eq!(config.vcs_type, "github");
+        assert_eq!(config.vcs_type, "gh");
         assert_eq!(config.org, "myorg");
         assert_eq!(config.repo, "myrepo");
     }
@@ -366,12 +403,12 @@ mod tests {
 
     #[test]
     fn host_to_vcs_type_github() {
-        assert_eq!(host_to_vcs_type("github.com").unwrap(), "github");
+        assert_eq!(host_to_vcs_type("github.com").unwrap(), "gh");
     }
 
     #[test]
     fn host_to_vcs_type_bitbucket() {
-        assert_eq!(host_to_vcs_type("bitbucket.org").unwrap(), "bitbucket");
+        assert_eq!(host_to_vcs_type("bitbucket.org").unwrap(), "bb");
     }
 
     #[test]
@@ -386,7 +423,7 @@ mod tests {
     fn parse_https_with_dot_git() {
         let (vcs, org, repo) =
             parse_git_remote_url("https://github.com/myorg/myrepo.git").unwrap();
-        assert_eq!(vcs, "github");
+        assert_eq!(vcs, "gh");
         assert_eq!(org, "myorg");
         assert_eq!(repo, "myrepo");
     }
@@ -395,7 +432,7 @@ mod tests {
     fn parse_https_without_dot_git() {
         let (vcs, org, repo) =
             parse_git_remote_url("https://github.com/myorg/myrepo").unwrap();
-        assert_eq!(vcs, "github");
+        assert_eq!(vcs, "gh");
         assert_eq!(org, "myorg");
         assert_eq!(repo, "myrepo");
     }
@@ -404,7 +441,7 @@ mod tests {
     fn parse_ssh_scp_format() {
         let (vcs, org, repo) =
             parse_git_remote_url("git@github.com:myorg/myrepo.git").unwrap();
-        assert_eq!(vcs, "github");
+        assert_eq!(vcs, "gh");
         assert_eq!(org, "myorg");
         assert_eq!(repo, "myrepo");
     }
@@ -413,7 +450,7 @@ mod tests {
     fn parse_ssh_url_format() {
         let (vcs, org, repo) =
             parse_git_remote_url("ssh://git@github.com/myorg/myrepo.git").unwrap();
-        assert_eq!(vcs, "github");
+        assert_eq!(vcs, "gh");
         assert_eq!(org, "myorg");
         assert_eq!(repo, "myrepo");
     }
@@ -422,7 +459,7 @@ mod tests {
     fn parse_bitbucket_https() {
         let (vcs, org, repo) =
             parse_git_remote_url("https://bitbucket.org/myorg/myrepo.git").unwrap();
-        assert_eq!(vcs, "bitbucket");
+        assert_eq!(vcs, "bb");
         assert_eq!(org, "myorg");
         assert_eq!(repo, "myrepo");
     }
@@ -431,7 +468,7 @@ mod tests {
     fn parse_bitbucket_ssh() {
         let (vcs, org, repo) =
             parse_git_remote_url("git@bitbucket.org:myorg/myrepo.git").unwrap();
-        assert_eq!(vcs, "bitbucket");
+        assert_eq!(vcs, "bb");
         assert_eq!(org, "myorg");
         assert_eq!(repo, "myrepo");
     }
@@ -440,7 +477,7 @@ mod tests {
     fn parse_trailing_newline() {
         let (vcs, org, repo) =
             parse_git_remote_url("https://github.com/myorg/myrepo.git\n").unwrap();
-        assert_eq!(vcs, "github");
+        assert_eq!(vcs, "gh");
         assert_eq!(org, "myorg");
         assert_eq!(repo, "myrepo");
     }
@@ -472,7 +509,7 @@ mod tests {
     fn parse_http_url() {
         let (vcs, org, repo) =
             parse_git_remote_url("http://github.com/myorg/myrepo.git").unwrap();
-        assert_eq!(vcs, "github");
+        assert_eq!(vcs, "gh");
         assert_eq!(org, "myorg");
         assert_eq!(repo, "myrepo");
     }
