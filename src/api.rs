@@ -35,12 +35,12 @@ impl CircleCiClient {
             return Ok(resp);
         }
         match status.as_u16() {
-            401 => bail!("認証エラー: トークンが無効です。CIRCLE_TOKEN を確認してください"),
-            404 => bail!("リソースが見つかりません (404)。ID やプロジェクト設定を確認してください"),
-            429 => bail!("レート制限に達しました。しばらく待ってから再試行してください"),
+            401 => bail!("Authentication failed: invalid token. Check CIRCLE_TOKEN"),
+            404 => bail!("Resource not found (404). Check the ID or project settings"),
+            429 => bail!("Rate limited. Please wait and retry"),
             _ => {
                 let body = resp.text().await.unwrap_or_default();
-                bail!("API エラー ({}): {}", status, body)
+                bail!("API error ({}): {}", status, body)
             }
         }
     }
@@ -59,9 +59,9 @@ impl CircleCiClient {
             .header(header, value)
             .send()
             .await
-            .context("ジョブ情報の取得に失敗")?;
+            .context("Failed to fetch job detail")?;
         let resp = Self::check_response(resp).await?;
-        resp.json().await.context("ジョブ情報のパースに失敗")
+        resp.json().await.context("Failed to parse job detail")
     }
 
     pub async fn fetch_action_output(&self, output_url: &str) -> Result<String> {
@@ -72,7 +72,7 @@ impl CircleCiClient {
             .header(header, value)
             .send()
             .await
-            .context("ログの取得に失敗")?;
+            .context("Failed to fetch action output")?;
         let resp = Self::check_response(resp).await?;
         let outputs: Vec<ActionOutput> = resp.json().await.unwrap_or_default();
         Ok(aggregate_action_outputs(outputs))
@@ -95,12 +95,12 @@ impl CircleCiClient {
                 .header(header, value)
                 .send()
                 .await
-                .context("ワークフロージョブ一覧の取得に失敗")?;
+                .context("Failed to fetch workflow jobs")?;
             let resp = Self::check_response(resp).await?;
             let data: WorkflowJobsResponse = resp
                 .json()
                 .await
-                .context("ワークフロージョブ一覧のパースに失敗")?;
+                .context("Failed to parse workflow jobs")?;
             all_jobs.extend(data.items);
             match data.next_page_token {
                 Some(token) if !token.is_empty() => page_token = Some(token),
@@ -134,12 +134,12 @@ impl CircleCiClient {
                 .header(header, value)
                 .send()
                 .await
-                .context("パイプラインワークフロー一覧の取得に失敗")?;
+                .context("Failed to fetch pipeline workflows")?;
             let resp = Self::check_response(resp).await?;
             let data: PipelineWorkflowsResponse = resp
                 .json()
                 .await
-                .context("パイプラインワークフロー一覧のパースに失敗")?;
+                .context("Failed to parse pipeline workflows")?;
             all_workflows.extend(data.items);
             match data.next_page_token {
                 Some(token) if !token.is_empty() => page_token = Some(token),
@@ -164,12 +164,12 @@ impl CircleCiClient {
                 .header(header, value)
                 .send()
                 .await
-                .context("パイプライン一覧の取得に失敗")?;
+                .context("Failed to fetch pipelines")?;
             let resp = Self::check_response(resp).await?;
             let data: PipelinesResponse = resp
                 .json()
                 .await
-                .context("パイプライン一覧のパースに失敗")?;
+                .context("Failed to parse pipelines")?;
             for pipeline in &data.items {
                 if pipeline.number == pipeline_number {
                     return Ok(pipeline.id.clone());
@@ -180,7 +180,7 @@ impl CircleCiClient {
                 _ => break,
             }
         }
-        bail!("パイプライン番号 {} が見つかりません", pipeline_number)
+        bail!("Pipeline number {} not found", pipeline_number)
     }
 }
 
