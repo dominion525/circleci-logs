@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
 struct ConfigFile {
@@ -32,11 +32,15 @@ impl std::fmt::Debug for Config {
 impl Config {
     pub fn load() -> Result<Self> {
         let config_file = find_config_file();
-        let parsed = config_file
-            .as_ref()
-            .map(|path| {
-                let content = fs::read_to_string(path)
-                    .with_context(|| format!("Failed to read config file: {}", path.display()))?;
+        let env_token = env::var("CIRCLE_TOKEN").ok();
+        Self::from_file_and_token(config_file.as_deref(), env_token)
+    }
+
+    fn from_file_and_token(config_path: Option<&Path>, env_token: Option<String>) -> Result<Self> {
+        let parsed = config_path
+            .map(|p| {
+                let content = fs::read_to_string(p)
+                    .with_context(|| format!("Failed to read config file: {}", p.display()))?;
                 let config: ConfigFile =
                     toml::from_str(&content).context("Failed to parse config file")?;
                 Ok::<_, anyhow::Error>(config)
@@ -44,7 +48,7 @@ impl Config {
             .transpose()?;
 
         let token = resolve_token(
-            env::var("CIRCLE_TOKEN").ok(),
+            env_token,
             parsed.as_ref().and_then(|c| c.token.clone()),
         )?;
 
@@ -69,7 +73,12 @@ impl Config {
 }
 
 fn find_config_file() -> Option<PathBuf> {
-    let mut dir = env::current_dir().ok()?;
+    let dir = env::current_dir().ok()?;
+    find_config_file_from(&dir)
+}
+
+fn find_config_file_from(start_dir: &Path) -> Option<PathBuf> {
+    let mut dir = start_dir.to_path_buf();
     loop {
         let candidate = dir.join(".circleci-logs.toml");
         if candidate.exists() {
@@ -190,5 +199,124 @@ mod tests {
         assert!(!debug.contains("super-secret-token"));
         assert!(debug.contains("***"));
         assert!(debug.contains("myorg"));
+    }
+
+    // --- from_file_and_token tests ---
+
+    #[test]
+    fn load_full_config_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".circleci-logs.toml");
+        fs::write(&path, "token = \"my-token\"\nproject = \"github/myorg/myrepo\"\n").unwrap();
+
+        let config = Config::from_file_and_token(Some(&path), None).unwrap();
+        assert_eq!(config.token, "my-token");
+        assert_eq!(config.vcs_type, "github");
+        assert_eq!(config.org, "myorg");
+        assert_eq!(config.repo, "myrepo");
+    }
+
+    #[test]
+    fn load_env_token_overrides_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".circleci-logs.toml");
+        fs::write(&path, "token = \"file-token\"\nproject = \"github/org/repo\"\n").unwrap();
+
+        let config =
+            Config::from_file_and_token(Some(&path), Some("env-token".to_string())).unwrap();
+        assert_eq!(config.token, "env-token");
+    }
+
+    #[test]
+    fn load_env_token_when_file_has_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".circleci-logs.toml");
+        fs::write(&path, "project = \"github/org/repo\"\n").unwrap();
+
+        let config =
+            Config::from_file_and_token(Some(&path), Some("env-tok".to_string())).unwrap();
+        assert_eq!(config.token, "env-tok");
+    }
+
+    #[test]
+    fn load_missing_project_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".circleci-logs.toml");
+        fs::write(&path, "token = \"tok\"\n").unwrap();
+
+        let err = Config::from_file_and_token(Some(&path), None).unwrap_err();
+        assert!(err.to_string().contains("Missing 'project' field"));
+    }
+
+    #[test]
+    fn load_malformed_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".circleci-logs.toml");
+        fs::write(&path, "this is not valid toml [[[").unwrap();
+
+        let err = Config::from_file_and_token(Some(&path), None).unwrap_err();
+        assert!(err.to_string().contains("Failed to parse config file"));
+    }
+
+    #[test]
+    fn load_no_token_anywhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".circleci-logs.toml");
+        fs::write(&path, "project = \"github/org/repo\"\n").unwrap();
+
+        let err = Config::from_file_and_token(Some(&path), None).unwrap_err();
+        assert!(err.to_string().contains("Token not found"));
+    }
+
+    #[test]
+    fn load_no_config_file() {
+        let err =
+            Config::from_file_and_token(None, Some("tok".to_string())).unwrap_err();
+        assert!(err.to_string().contains("Missing 'project' field"));
+    }
+
+    #[test]
+    fn load_invalid_project_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".circleci-logs.toml");
+        fs::write(&path, "token = \"tok\"\nproject = \"invalid-format\"\n").unwrap();
+
+        let err = Config::from_file_and_token(Some(&path), None).unwrap_err();
+        assert!(err.to_string().contains("vcs_type/org/repo"));
+    }
+
+    // --- find_config_file_from tests ---
+
+    #[test]
+    fn find_config_in_current_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".circleci-logs.toml"), "").unwrap();
+
+        let found = find_config_file_from(dir.path()).unwrap();
+        let expected = fs::canonicalize(dir.path().join(".circleci-logs.toml")).unwrap();
+        let actual = fs::canonicalize(found).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn find_config_walks_up() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".circleci-logs.toml"), "").unwrap();
+        let child = dir.path().join("sub").join("deep");
+        fs::create_dir_all(&child).unwrap();
+
+        let found = find_config_file_from(&child).unwrap();
+        let expected = fs::canonicalize(dir.path().join(".circleci-logs.toml")).unwrap();
+        let actual = fs::canonicalize(found).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn find_config_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = dir.path().join("empty");
+        fs::create_dir_all(&child).unwrap();
+
+        assert!(find_config_file_from(&child).is_none());
     }
 }
