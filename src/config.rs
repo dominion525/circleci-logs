@@ -32,10 +32,10 @@ impl Config {
             })
             .transpose()?;
 
-        let token = env::var("CIRCLE_TOKEN")
-            .ok()
-            .or_else(|| parsed.as_ref().and_then(|c| c.token.clone()))
-            .context("トークンが見つかりません。環境変数 CIRCLE_TOKEN または .circleci-logs.toml の token を設定してください")?;
+        let token = resolve_token(
+            env::var("CIRCLE_TOKEN").ok(),
+            parsed.as_ref().and_then(|c| c.token.clone()),
+        )?;
 
         let project_str = parsed
             .as_ref()
@@ -70,6 +70,12 @@ fn find_config_file() -> Option<PathBuf> {
     }
 }
 
+fn resolve_token(env_token: Option<String>, file_token: Option<String>) -> Result<String> {
+    env_token
+        .or(file_token)
+        .context("トークンが見つかりません。環境変数 CIRCLE_TOKEN または .circleci-logs.toml の token を設定してください")
+}
+
 fn parse_project(project: &str) -> Result<(String, String, String)> {
     let parts: Vec<&str> = project.split('/').collect();
     if parts.len() != 3 {
@@ -80,4 +86,64 @@ fn parse_project(project: &str) -> Result<(String, String, String)> {
         parts[1].to_string(),
         parts[2].to_string(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_project_valid() {
+        let (vcs, org, repo) = parse_project("github/myorg/myrepo").unwrap();
+        assert_eq!(vcs, "github");
+        assert_eq!(org, "myorg");
+        assert_eq!(repo, "myrepo");
+    }
+
+    #[test]
+    fn parse_project_too_few_parts() {
+        assert!(parse_project("github/org").is_err());
+    }
+
+    #[test]
+    fn parse_project_too_many_parts() {
+        assert!(parse_project("a/b/c/d").is_err());
+    }
+
+    #[test]
+    fn parse_project_empty() {
+        assert!(parse_project("").is_err());
+    }
+
+    #[test]
+    fn project_slug_format() {
+        let config = Config {
+            token: "tok".to_string(),
+            vcs_type: "github".to_string(),
+            org: "myorg".to_string(),
+            repo: "myrepo".to_string(),
+        };
+        assert_eq!(config.project_slug(), "github/myorg/myrepo");
+    }
+
+    #[test]
+    fn resolve_token_env_wins() {
+        let result = resolve_token(
+            Some("env-token".to_string()),
+            Some("file-token".to_string()),
+        )
+        .unwrap();
+        assert_eq!(result, "env-token");
+    }
+
+    #[test]
+    fn resolve_token_file_fallback() {
+        let result = resolve_token(None, Some("file-token".to_string())).unwrap();
+        assert_eq!(result, "file-token");
+    }
+
+    #[test]
+    fn resolve_token_both_none() {
+        assert!(resolve_token(None, None).is_err());
+    }
 }

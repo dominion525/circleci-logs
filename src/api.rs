@@ -4,6 +4,14 @@ use reqwest::Client;
 use crate::config::Config;
 use crate::models::*;
 
+fn aggregate_action_outputs(outputs: Vec<ActionOutput>) -> String {
+    outputs
+        .into_iter()
+        .map(|o| o.message)
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 pub struct CircleCiClient {
     client: Client,
     config: Config,
@@ -67,11 +75,7 @@ impl CircleCiClient {
             .context("ログの取得に失敗")?;
         let resp = Self::check_response(resp).await?;
         let outputs: Vec<ActionOutput> = resp.json().await.unwrap_or_default();
-        Ok(outputs
-            .into_iter()
-            .map(|o| o.message)
-            .collect::<Vec<_>>()
-            .join(""))
+        Ok(aggregate_action_outputs(outputs))
     }
 
     // --- v2: Workflow jobs ---
@@ -177,5 +181,39 @@ impl CircleCiClient {
             }
         }
         bail!("パイプライン番号 {} が見つかりません", pipeline_number)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aggregate_empty() {
+        assert_eq!(aggregate_action_outputs(vec![]), "");
+    }
+
+    #[test]
+    fn aggregate_single() {
+        let outputs = vec![ActionOutput {
+            message: "hello".to_string(),
+            output_type: None,
+        }];
+        assert_eq!(aggregate_action_outputs(outputs), "hello");
+    }
+
+    #[test]
+    fn aggregate_multiple() {
+        let outputs = vec![
+            ActionOutput {
+                message: "hello ".to_string(),
+                output_type: Some("out".to_string()),
+            },
+            ActionOutput {
+                message: "world".to_string(),
+                output_type: None,
+            },
+        ];
+        assert_eq!(aggregate_action_outputs(outputs), "hello world");
     }
 }
