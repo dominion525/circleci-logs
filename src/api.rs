@@ -85,10 +85,8 @@ impl CircleCiClient {
             .await
             .context("Failed to fetch action output")?;
         let resp = Self::check_response(resp).await?;
-        let outputs: Vec<ActionOutput> = resp
-            .json()
-            .await
-            .context("Failed to parse action output")?;
+        let outputs: Vec<ActionOutput> =
+            resp.json().await.context("Failed to parse action output")?;
         Ok(aggregate_action_outputs(outputs))
     }
 
@@ -111,10 +109,8 @@ impl CircleCiClient {
                 .await
                 .context("Failed to fetch workflow jobs")?;
             let resp = Self::check_response(resp).await?;
-            let data: WorkflowJobsResponse = resp
-                .json()
-                .await
-                .context("Failed to parse workflow jobs")?;
+            let data: WorkflowJobsResponse =
+                resp.json().await.context("Failed to parse workflow jobs")?;
             all_jobs.extend(data.items);
             match data.next_page_token {
                 Some(token) if !token.is_empty() => page_token = Some(token),
@@ -180,10 +176,7 @@ impl CircleCiClient {
                 .await
                 .context("Failed to fetch pipelines")?;
             let resp = Self::check_response(resp).await?;
-            let data: PipelinesResponse = resp
-                .json()
-                .await
-                .context("Failed to parse pipelines")?;
+            let data: PipelinesResponse = resp.json().await.context("Failed to parse pipelines")?;
             for pipeline in &data.items {
                 if pipeline.number == pipeline_number {
                     return Ok(pipeline.id.clone());
