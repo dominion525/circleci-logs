@@ -144,7 +144,7 @@ mod tests {
     fn test_config() -> Config {
         Config {
             token: "test-token".into(),
-            vcs_type: "github".into(),
+            vcs_type: "gh".into(),
             org: "test-org".into(),
             repo: "test-repo".into(),
         }
@@ -323,7 +323,7 @@ mod tests {
         });
 
         Mock::given(method("GET"))
-            .and(path("/api/v1.1/project/github/test-org/test-repo/42"))
+            .and(path("/api/v1.1/project/gh/test-org/test-repo/42"))
             .and(header("Circle-Token", "test-token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(&job_detail))
             .mount(&server)
