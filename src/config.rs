@@ -73,6 +73,7 @@ fn find_config_file() -> Option<PathBuf> {
     loop {
         let candidate = dir.join(".circleci-logs.toml");
         if candidate.exists() {
+            warn_if_permissive(&candidate);
             return Some(candidate);
         }
         if !dir.pop() {
@@ -80,6 +81,25 @@ fn find_config_file() -> Option<PathBuf> {
         }
     }
 }
+
+#[cfg(unix)]
+fn warn_if_permissive(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = fs::metadata(path) {
+        let mode = meta.permissions().mode();
+        if mode & 0o077 != 0 {
+            eprintln!(
+                "Warning: {} is accessible by other users (mode {:o}). Consider: chmod 600 {}",
+                path.display(),
+                mode & 0o777,
+                path.display(),
+            );
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_if_permissive(_path: &std::path::Path) {}
 
 fn resolve_token(env_token: Option<String>, file_token: Option<String>) -> Result<String> {
     env_token
