@@ -13,6 +13,17 @@ fn colorize_status(status: &str) -> String {
     }
 }
 
+fn filter_log_lines(content: &str, grep: Option<&Regex>) -> String {
+    match grep {
+        Some(re) => content
+            .lines()
+            .filter(|line| re.is_match(line))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        None => content.to_string(),
+    }
+}
+
 fn format_duration(millis: Option<u64>) -> String {
     match millis {
         Some(ms) => {
@@ -100,14 +111,7 @@ pub fn print_job_log(
             if content.is_empty() {
                 continue;
             }
-            let filtered: String = match grep {
-                Some(re) => content
-                    .lines()
-                    .filter(|line| re.is_match(line))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                None => content.clone(),
-            };
+            let filtered = filter_log_lines(content, grep);
             if filtered.is_empty() {
                 continue;
             }
@@ -169,5 +173,65 @@ pub fn print_pipeline_workflows(workflows: &[PipelineWorkflow], json: bool) {
             created,
             stopped
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_duration_none() {
+        assert_eq!(format_duration(None), "-");
+    }
+
+    #[test]
+    fn format_duration_zero() {
+        assert_eq!(format_duration(Some(0)), "0s");
+    }
+
+    #[test]
+    fn format_duration_seconds() {
+        assert_eq!(format_duration(Some(5000)), "5s");
+    }
+
+    #[test]
+    fn format_duration_minutes() {
+        assert_eq!(format_duration(Some(60000)), "1m0s");
+    }
+
+    #[test]
+    fn format_duration_minutes_and_seconds() {
+        assert_eq!(format_duration(Some(125000)), "2m5s");
+    }
+
+    #[test]
+    fn colorize_status_values() {
+        colored::control::set_override(false);
+        assert_eq!(colorize_status("success"), "success");
+        assert_eq!(colorize_status("failed"), "failed");
+        assert_eq!(colorize_status("running"), "running");
+        assert_eq!(colorize_status("cancelled"), "cancelled");
+        assert_eq!(colorize_status("queued"), "queued");
+    }
+
+    #[test]
+    fn filter_log_lines_no_grep() {
+        let content = "line1\nline2\nline3";
+        assert_eq!(filter_log_lines(content, None), content);
+    }
+
+    #[test]
+    fn filter_log_lines_with_match() {
+        let re = Regex::new("error").unwrap();
+        let content = "info: ok\nerror: bad\ninfo: fine";
+        assert_eq!(filter_log_lines(content, Some(&re)), "error: bad");
+    }
+
+    #[test]
+    fn filter_log_lines_no_match() {
+        let re = Regex::new("error").unwrap();
+        let content = "info: ok\ninfo: fine";
+        assert_eq!(filter_log_lines(content, Some(&re)), "");
     }
 }
