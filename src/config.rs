@@ -156,8 +156,9 @@ fn parse_git_remote_url(url: &str) -> Result<(String, String, String)> {
         let slash_pos = rest.find('/').context("Invalid SSH URL: no path separator")?;
         (&rest[..slash_pos], &rest[slash_pos + 1..])
     } else if url.starts_with("https://") || url.starts_with("http://") {
-        // https://github.com/org/repo.git
+        // https://github.com/org/repo.git or https://user@github.com/org/repo.git
         let rest = url.split("://").nth(1).unwrap();
+        let rest = rest.split('@').last().unwrap_or(rest);
         let slash_pos = rest.find('/').context("Invalid HTTPS URL: no path separator")?;
         (&rest[..slash_pos], &rest[slash_pos + 1..])
     } else if url.contains(':') && !url.contains("://") {
@@ -503,6 +504,15 @@ mod tests {
     fn parse_unrecognized_format() {
         let err = parse_git_remote_url("/local/path/to/repo").unwrap_err();
         assert!(err.to_string().contains("Unrecognized git remote URL format"));
+    }
+
+    #[test]
+    fn parse_https_with_userinfo() {
+        let (vcs, org, repo) =
+            parse_git_remote_url("https://user@github.com/org/repo.git").unwrap();
+        assert_eq!(vcs, "gh");
+        assert_eq!(org, "org");
+        assert_eq!(repo, "repo");
     }
 
     #[test]
