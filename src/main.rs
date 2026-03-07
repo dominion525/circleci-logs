@@ -134,3 +134,224 @@ async fn run_pipeline_workflows(
     output::print_pipeline_workflows(&workflows, json)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn test_config() -> Config {
+        Config {
+            token: "test-token".into(),
+            vcs_type: "github".into(),
+            org: "test-org".into(),
+            repo: "test-repo".into(),
+        }
+    }
+
+    fn make_action(name: &str, status: &str, output_url: Option<&str>) -> models::Action {
+        models::Action {
+            name: name.to_string(),
+            status: status.to_string(),
+            run_time_millis: None,
+            output_url: output_url.map(|s| s.to_string()),
+            step: None,
+            index: None,
+        }
+    }
+
+    fn make_step(name: &str, actions: Vec<models::Action>) -> models::Step {
+        models::Step {
+            name: name.to_string(),
+            actions,
+        }
+    }
+
+    fn make_detail(steps: Option<Vec<models::Step>>) -> models::JobDetail {
+        models::JobDetail {
+            steps,
+            status: Some("success".to_string()),
+            build_num: Some(42),
+            workflows: None,
+        }
+    }
+
+    // --- fetch_step_logs tests ---
+
+    #[tokio::test]
+    async fn fetch_step_logs_with_output_urls() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/output/step1"))
+            .and(header("Circle-Token", "test-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!([{"message": "log1\n", "type": "out"}])),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/output/step2"))
+            .and(header("Circle-Token", "test-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!([{"message": "log2\n", "type": "out"}])),
+            )
+            .mount(&server)
+            .await;
+
+        let url1 = format!("{}/output/step1", server.uri());
+        let url2 = format!("{}/output/step2", server.uri());
+        let detail = make_detail(Some(vec![
+            make_step("step1", vec![make_action("a1", "success", Some(&url1))]),
+            make_step("step2", vec![make_action("a2", "failed", Some(&url2))]),
+        ]));
+
+        let logs = fetch_step_logs(&client, &detail, false).await;
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].0, "step1");
+        assert_eq!(logs[0].1, "log1\n");
+        assert_eq!(logs[1].0, "step2");
+        assert_eq!(logs[1].1, "log2\n");
+    }
+
+    #[tokio::test]
+    async fn fetch_step_logs_errors_only() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/output/failed"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!([{"message": "error output\n", "type": "out"}]),
+                ),
+            )
+            .mount(&server)
+            .await;
+
+        let fail_url = format!("{}/output/failed", server.uri());
+        let pass_url = format!("{}/output/passing", server.uri());
+        let detail = make_detail(Some(vec![
+            make_step(
+                "passing",
+                vec![make_action("a1", "success", Some(&pass_url))],
+            ),
+            make_step(
+                "failing",
+                vec![make_action("a2", "failed", Some(&fail_url))],
+            ),
+        ]));
+
+        let logs = fetch_step_logs(&client, &detail, true).await;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].0, "failing");
+        assert_eq!(logs[0].1, "error output\n");
+    }
+
+    #[tokio::test]
+    async fn fetch_step_logs_no_steps() {
+        let client =
+            CircleCiClient::with_base_url(test_config(), "http://unused:9999".to_string());
+        let detail = make_detail(None);
+
+        let logs = fetch_step_logs(&client, &detail, false).await;
+        assert!(logs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_step_logs_fetch_failure() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/output/broken"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/output/broken", server.uri());
+        let detail = make_detail(Some(vec![make_step(
+            "broken",
+            vec![make_action("a1", "failed", Some(&url))],
+        )]));
+
+        let logs = fetch_step_logs(&client, &detail, false).await;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].0, "broken");
+        assert_eq!(logs[0].1, "");
+    }
+
+    #[tokio::test]
+    async fn fetch_step_logs_no_output_url() {
+        let client =
+            CircleCiClient::with_base_url(test_config(), "http://unused:9999".to_string());
+        let detail = make_detail(Some(vec![make_step(
+            "step1",
+            vec![make_action("a1", "success", None)],
+        )]));
+
+        let logs = fetch_step_logs(&client, &detail, false).await;
+        assert!(logs.is_empty());
+    }
+
+    // --- run_job_log tests ---
+
+    #[tokio::test]
+    async fn run_job_log_success() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        let output_url = format!("{}/output/1", server.uri());
+        let job_detail = serde_json::json!({
+            "steps": [{
+                "name": "build",
+                "actions": [{
+                    "name": "compile",
+                    "status": "success",
+                    "run_time_millis": 1000,
+                    "output_url": output_url,
+                    "step": 0,
+                    "index": 0
+                }]
+            }],
+            "status": "success",
+            "build_num": 42,
+            "workflows": {"workflow_name": "main", "job_name": "build"}
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1.1/project/github/test-org/test-repo/42"))
+            .and(header("Circle-Token", "test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&job_detail))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/output/1"))
+            .and(header("Circle-Token", "test-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!([{"message": "built ok\n", "type": "out"}])),
+            )
+            .mount(&server)
+            .await;
+
+        let result = run_job_log(&client, 42, false, None, false).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_job_log_invalid_grep() {
+        let client =
+            CircleCiClient::with_base_url(test_config(), "http://unused:9999".to_string());
+
+        let result = run_job_log(&client, 42, false, Some("[invalid"), false).await;
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Invalid regex pattern"));
+    }
+}
