@@ -3,6 +3,7 @@ use serde::Deserialize;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Debug, Deserialize)]
 struct ConfigFile {
@@ -49,11 +50,13 @@ impl Config {
 
         let token = resolve_token(env_token, parsed.as_ref().and_then(|c| c.token.clone()))?;
 
-        let project_str = parsed.as_ref().and_then(|c| c.project.clone()).context(
-            "Missing 'project' field. Set it in .circleci-logs.toml (e.g. github/org/repo)",
-        )?;
-
-        let (vcs_type, org, repo) = parse_project(&project_str)?;
+        let (vcs_type, org, repo) = match parsed.as_ref().and_then(|c| c.project.clone()) {
+            Some(project_str) => parse_project(&project_str)?,
+            None => detect_project_from_git_remote().context(
+                "Could not determine project. Set 'project' in .circleci-logs.toml \
+                 (e.g. github/org/repo) or run from inside a git repository with a remote named 'origin'",
+            )?,
+        };
 
         Ok(Config {
             token,
@@ -122,6 +125,74 @@ fn parse_project(project: &str) -> Result<(String, String, String)> {
         parts[1].to_string(),
         parts[2].to_string(),
     ))
+}
+
+fn host_to_vcs_type(host: &str) -> Result<String> {
+    match host {
+        "github.com" => Ok("github".to_string()),
+        "bitbucket.org" => Ok("bitbucket".to_string()),
+        _ => bail!("Unsupported git host '{}'. Only github.com and bitbucket.org are supported", host),
+    }
+}
+
+fn parse_git_remote_url(url: &str) -> Result<(String, String, String)> {
+    let url = url.trim();
+    if url.is_empty() {
+        bail!("Empty git remote URL");
+    }
+
+    let (host, path) = if url.starts_with("ssh://") {
+        // ssh://git@github.com/org/repo.git
+        let rest = url.strip_prefix("ssh://").unwrap();
+        let rest = rest.split('@').last().unwrap_or(rest);
+        let slash_pos = rest.find('/').context("Invalid SSH URL: no path separator")?;
+        (&rest[..slash_pos], &rest[slash_pos + 1..])
+    } else if url.starts_with("https://") || url.starts_with("http://") {
+        // https://github.com/org/repo.git
+        let rest = url.split("://").nth(1).unwrap();
+        let slash_pos = rest.find('/').context("Invalid HTTPS URL: no path separator")?;
+        (&rest[..slash_pos], &rest[slash_pos + 1..])
+    } else if url.contains(':') && !url.contains("://") {
+        // git@github.com:org/repo.git (SCP-like syntax)
+        let at_host = url.split(':').next().unwrap();
+        let host = at_host.split('@').last().unwrap_or(at_host);
+        let path = url.split(':').nth(1).unwrap();
+        (host, path)
+    } else {
+        bail!("Unrecognized git remote URL format: {}", url);
+    };
+
+    let vcs_type = host_to_vcs_type(host)?;
+
+    // Strip trailing .git
+    let path = path.strip_suffix(".git").unwrap_or(path);
+
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.len() != 2 {
+        bail!(
+            "Expected 'org/repo' path in git remote URL, got '{}'",
+            path
+        );
+    }
+
+    Ok((vcs_type, parts[0].to_string(), parts[1].to_string()))
+}
+
+fn detect_project_from_git_remote() -> Result<(String, String, String)> {
+    let output = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .context("Failed to run 'git remote get-url origin'")?;
+
+    if !output.status.success() {
+        bail!(
+            "git remote get-url origin failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let url = String::from_utf8(output.stdout).context("git remote URL is not valid UTF-8")?;
+    parse_git_remote_url(&url)
 }
 
 #[cfg(test)]
@@ -242,13 +313,15 @@ mod tests {
     }
 
     #[test]
-    fn load_missing_project_field() {
+    fn load_missing_project_field_falls_back_to_git_remote() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".circleci-logs.toml");
         fs::write(&path, "token = \"tok\"\n").unwrap();
 
-        let err = Config::from_file_and_token(Some(&path), None).unwrap_err();
-        assert!(err.to_string().contains("Missing 'project' field"));
+        // This test runs inside a git repo, so detect_project_from_git_remote should succeed
+        let config = Config::from_file_and_token(Some(&path), None).unwrap();
+        assert!(!config.org.is_empty());
+        assert!(!config.repo.is_empty());
     }
 
     #[test]
@@ -272,9 +345,11 @@ mod tests {
     }
 
     #[test]
-    fn load_no_config_file() {
-        let err = Config::from_file_and_token(None, Some("tok".to_string())).unwrap_err();
-        assert!(err.to_string().contains("Missing 'project' field"));
+    fn load_no_config_file_falls_back_to_git_remote() {
+        // This test runs inside a git repo, so detect_project_from_git_remote should succeed
+        let config = Config::from_file_and_token(None, Some("tok".to_string())).unwrap();
+        assert!(!config.org.is_empty());
+        assert!(!config.repo.is_empty());
     }
 
     #[test]
@@ -285,6 +360,127 @@ mod tests {
 
         let err = Config::from_file_and_token(Some(&path), None).unwrap_err();
         assert!(err.to_string().contains("vcs_type/org/repo"));
+    }
+
+    // --- host_to_vcs_type tests ---
+
+    #[test]
+    fn host_to_vcs_type_github() {
+        assert_eq!(host_to_vcs_type("github.com").unwrap(), "github");
+    }
+
+    #[test]
+    fn host_to_vcs_type_bitbucket() {
+        assert_eq!(host_to_vcs_type("bitbucket.org").unwrap(), "bitbucket");
+    }
+
+    #[test]
+    fn host_to_vcs_type_unsupported() {
+        let err = host_to_vcs_type("gitlab.com").unwrap_err();
+        assert!(err.to_string().contains("Unsupported git host"));
+    }
+
+    // --- parse_git_remote_url tests ---
+
+    #[test]
+    fn parse_https_with_dot_git() {
+        let (vcs, org, repo) =
+            parse_git_remote_url("https://github.com/myorg/myrepo.git").unwrap();
+        assert_eq!(vcs, "github");
+        assert_eq!(org, "myorg");
+        assert_eq!(repo, "myrepo");
+    }
+
+    #[test]
+    fn parse_https_without_dot_git() {
+        let (vcs, org, repo) =
+            parse_git_remote_url("https://github.com/myorg/myrepo").unwrap();
+        assert_eq!(vcs, "github");
+        assert_eq!(org, "myorg");
+        assert_eq!(repo, "myrepo");
+    }
+
+    #[test]
+    fn parse_ssh_scp_format() {
+        let (vcs, org, repo) =
+            parse_git_remote_url("git@github.com:myorg/myrepo.git").unwrap();
+        assert_eq!(vcs, "github");
+        assert_eq!(org, "myorg");
+        assert_eq!(repo, "myrepo");
+    }
+
+    #[test]
+    fn parse_ssh_url_format() {
+        let (vcs, org, repo) =
+            parse_git_remote_url("ssh://git@github.com/myorg/myrepo.git").unwrap();
+        assert_eq!(vcs, "github");
+        assert_eq!(org, "myorg");
+        assert_eq!(repo, "myrepo");
+    }
+
+    #[test]
+    fn parse_bitbucket_https() {
+        let (vcs, org, repo) =
+            parse_git_remote_url("https://bitbucket.org/myorg/myrepo.git").unwrap();
+        assert_eq!(vcs, "bitbucket");
+        assert_eq!(org, "myorg");
+        assert_eq!(repo, "myrepo");
+    }
+
+    #[test]
+    fn parse_bitbucket_ssh() {
+        let (vcs, org, repo) =
+            parse_git_remote_url("git@bitbucket.org:myorg/myrepo.git").unwrap();
+        assert_eq!(vcs, "bitbucket");
+        assert_eq!(org, "myorg");
+        assert_eq!(repo, "myrepo");
+    }
+
+    #[test]
+    fn parse_trailing_newline() {
+        let (vcs, org, repo) =
+            parse_git_remote_url("https://github.com/myorg/myrepo.git\n").unwrap();
+        assert_eq!(vcs, "github");
+        assert_eq!(org, "myorg");
+        assert_eq!(repo, "myrepo");
+    }
+
+    #[test]
+    fn parse_unsupported_host() {
+        let err = parse_git_remote_url("https://gitlab.com/myorg/myrepo.git").unwrap_err();
+        assert!(err.to_string().contains("Unsupported git host"));
+    }
+
+    #[test]
+    fn parse_invalid_path_segments() {
+        let err = parse_git_remote_url("https://github.com/only-one-segment").unwrap_err();
+        assert!(err.to_string().contains("Expected 'org/repo' path"));
+    }
+
+    #[test]
+    fn parse_empty_url() {
+        assert!(parse_git_remote_url("").is_err());
+    }
+
+    #[test]
+    fn parse_unrecognized_format() {
+        let err = parse_git_remote_url("/local/path/to/repo").unwrap_err();
+        assert!(err.to_string().contains("Unrecognized git remote URL format"));
+    }
+
+    #[test]
+    fn parse_http_url() {
+        let (vcs, org, repo) =
+            parse_git_remote_url("http://github.com/myorg/myrepo.git").unwrap();
+        assert_eq!(vcs, "github");
+        assert_eq!(org, "myorg");
+        assert_eq!(repo, "myrepo");
+    }
+
+    #[test]
+    fn parse_too_many_path_segments() {
+        let err = parse_git_remote_url("https://github.com/a/b/c/d").unwrap_err();
+        assert!(err.to_string().contains("Expected 'org/repo' path"));
     }
 
     // --- find_config_file_from tests ---
