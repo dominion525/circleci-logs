@@ -109,13 +109,13 @@ async fn run_job_log(
         logs.push((step_name.clone(), content));
     }
 
-    output::print_job_log(&detail, &logs, errors_only, grep_re.as_ref(), json);
+    output::print_job_log(&detail, &logs, errors_only, grep_re.as_ref(), json)?;
     Ok(())
 }
 
 async fn run_workflow_jobs(client: &CircleCiClient, workflow_id: &str, json: bool) -> Result<()> {
     let jobs = client.fetch_workflow_jobs(workflow_id).await?;
-    output::print_workflow_jobs(&jobs, json);
+    output::print_workflow_jobs(&jobs, json)?;
     Ok(())
 }
 
@@ -125,6 +125,6 @@ async fn run_pipeline_workflows(
     json: bool,
 ) -> Result<()> {
     let workflows = client.fetch_pipeline_workflows(pipeline_number).await?;
-    output::print_pipeline_workflows(&workflows, json);
+    output::print_pipeline_workflows(&workflows, json)?;
     Ok(())
 }

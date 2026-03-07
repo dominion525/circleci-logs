@@ -1,3 +1,4 @@
+use anyhow::Result;
 use colored::Colorize;
 use regex::Regex;
 
@@ -44,7 +45,7 @@ pub fn print_job_log(
     errors_only: bool,
     grep: Option<&Regex>,
     json: bool,
-) {
+) -> Result<()> {
     if json {
         let output = serde_json::json!({
             "build_num": detail.build_num,
@@ -70,8 +71,8 @@ pub fn print_job_log(
                 })
             }).collect::<Vec<_>>(),
         });
-        println!("{}", serde_json::to_string_pretty(&output).unwrap());
-        return;
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
     }
 
     if let Some(ref wf) = detail.workflows {
@@ -120,12 +121,13 @@ pub fn print_job_log(
             println!();
         }
     }
+    Ok(())
 }
 
-pub fn print_workflow_jobs(jobs: &[WorkflowJob], json: bool) {
+pub fn print_workflow_jobs(jobs: &[WorkflowJob], json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(jobs).unwrap());
-        return;
+        println!("{}", serde_json::to_string_pretty(jobs)?);
+        return Ok(());
     }
 
     println!(
@@ -149,12 +151,13 @@ pub fn print_workflow_jobs(jobs: &[WorkflowJob], json: bool) {
             stopped
         );
     }
+    Ok(())
 }
 
-pub fn print_pipeline_workflows(workflows: &[PipelineWorkflow], json: bool) {
+pub fn print_pipeline_workflows(workflows: &[PipelineWorkflow], json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(workflows).unwrap());
-        return;
+        println!("{}", serde_json::to_string_pretty(workflows)?);
+        return Ok(());
     }
 
     println!(
@@ -174,6 +177,7 @@ pub fn print_pipeline_workflows(workflows: &[PipelineWorkflow], json: bool) {
             stopped
         );
     }
+    Ok(())
 }
 
 #[cfg(test)]
