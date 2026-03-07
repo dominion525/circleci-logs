@@ -39,6 +39,38 @@ fn format_duration(millis: Option<u64>) -> String {
     }
 }
 
+fn build_job_log_json(
+    detail: &JobDetail,
+    logs: &[(String, String)],
+    grep: Option<&Regex>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "build_num": detail.build_num,
+        "status": detail.status,
+        "steps": detail.steps.as_ref().map(|steps| {
+            steps.iter().map(|step| {
+                serde_json::json!({
+                    "name": step.name,
+                    "actions": step.actions.iter().map(|a| {
+                        serde_json::json!({
+                            "name": a.name,
+                            "status": a.status,
+                            "run_time_millis": a.run_time_millis,
+                        })
+                    }).collect::<Vec<_>>()
+                })
+            }).collect::<Vec<_>>()
+        }),
+        "logs": logs.iter().map(|(name, content)| {
+            let filtered = filter_log_lines(content, grep);
+            serde_json::json!({
+                "step": name,
+                "output": filtered,
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
 pub fn print_job_log(
     detail: &JobDetail,
     logs: &[(String, String)],
@@ -47,31 +79,7 @@ pub fn print_job_log(
     json: bool,
 ) -> Result<()> {
     if json {
-        let output = serde_json::json!({
-            "build_num": detail.build_num,
-            "status": detail.status,
-            "steps": detail.steps.as_ref().map(|steps| {
-                steps.iter().map(|step| {
-                    serde_json::json!({
-                        "name": step.name,
-                        "actions": step.actions.iter().map(|a| {
-                            serde_json::json!({
-                                "name": a.name,
-                                "status": a.status,
-                                "run_time_millis": a.run_time_millis,
-                            })
-                        }).collect::<Vec<_>>()
-                    })
-                }).collect::<Vec<_>>()
-            }),
-            "logs": logs.iter().map(|(name, content)| {
-                let filtered = filter_log_lines(content, grep);
-                serde_json::json!({
-                    "step": name,
-                    "output": filtered,
-                })
-            }).collect::<Vec<_>>(),
-        });
+        let output = build_job_log_json(detail, logs, grep);
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
@@ -238,5 +246,157 @@ mod tests {
         let re = Regex::new("error").unwrap();
         let content = "info: ok\ninfo: fine";
         assert_eq!(filter_log_lines(content, Some(&re)), "");
+    }
+
+    // --- build_job_log_json tests ---
+
+    fn make_detail(
+        steps: Option<Vec<Step>>,
+        status: Option<&str>,
+        build_num: Option<u64>,
+    ) -> JobDetail {
+        JobDetail {
+            steps,
+            status: status.map(|s| s.to_string()),
+            build_num,
+            workflows: None,
+        }
+    }
+
+    fn make_step(name: &str, actions: Vec<Action>) -> Step {
+        Step {
+            name: name.to_string(),
+            actions,
+        }
+    }
+
+    fn make_action(name: &str, status: &str, run_time_millis: Option<u64>) -> Action {
+        Action {
+            name: name.to_string(),
+            status: status.to_string(),
+            run_time_millis,
+            output_url: None,
+            step: None,
+            index: None,
+        }
+    }
+
+    #[test]
+    fn build_job_log_json_normal() {
+        let detail = make_detail(
+            Some(vec![make_step(
+                "build",
+                vec![make_action("compile", "success", Some(3000))],
+            )]),
+            Some("success"),
+            Some(42),
+        );
+        let logs = vec![("build".to_string(), "output line".to_string())];
+        let val = build_job_log_json(&detail, &logs, None);
+
+        assert_eq!(val["build_num"], 42);
+        assert_eq!(val["status"], "success");
+        assert!(val["steps"].is_array());
+        let step = &val["steps"][0];
+        assert_eq!(step["name"], "build");
+        assert_eq!(step["actions"][0]["name"], "compile");
+        assert_eq!(step["actions"][0]["status"], "success");
+        assert_eq!(step["actions"][0]["run_time_millis"], 3000);
+        assert_eq!(val["logs"][0]["step"], "build");
+        assert_eq!(val["logs"][0]["output"], "output line");
+    }
+
+    #[test]
+    fn build_job_log_json_steps_none() {
+        let detail = make_detail(None, Some("failed"), Some(1));
+        let val = build_job_log_json(&detail, &[], None);
+        assert!(val["steps"].is_null());
+    }
+
+    #[test]
+    fn build_job_log_json_empty_logs() {
+        let detail = make_detail(None, None, None);
+        let val = build_job_log_json(&detail, &[], None);
+        assert_eq!(val["logs"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn build_job_log_json_grep_filter() {
+        let detail = make_detail(None, None, None);
+        let logs = vec![("step1".to_string(), "ok line\nerror here\nfine".to_string())];
+        let re = Regex::new("error").unwrap();
+        let val = build_job_log_json(&detail, &logs, Some(&re));
+        assert_eq!(val["logs"][0]["output"], "error here");
+    }
+
+    // --- smoke tests for print_* functions ---
+
+    #[test]
+    fn print_job_log_text_smoke() {
+        let detail = make_detail(
+            Some(vec![make_step(
+                "test",
+                vec![make_action("run tests", "success", Some(1000))],
+            )]),
+            Some("success"),
+            Some(10),
+        );
+        let logs = vec![("test".to_string(), "all passed".to_string())];
+        let result = print_job_log(&detail, &logs, false, None, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn print_job_log_json_smoke() {
+        let detail = make_detail(
+            Some(vec![make_step(
+                "test",
+                vec![make_action("run tests", "success", Some(1000))],
+            )]),
+            Some("success"),
+            Some(10),
+        );
+        let logs = vec![("test".to_string(), "all passed".to_string())];
+        let result = print_job_log(&detail, &logs, false, None, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn print_workflow_jobs_empty_smoke() {
+        assert!(print_workflow_jobs(&[], false).is_ok());
+    }
+
+    #[test]
+    fn print_workflow_jobs_one_item_smoke() {
+        let jobs = vec![WorkflowJob {
+            id: "j1".to_string(),
+            name: "build".to_string(),
+            status: "success".to_string(),
+            job_number: Some(5),
+            job_type: None,
+            started_at: Some("2024-01-01T00:00:00Z".to_string()),
+            stopped_at: None,
+        }];
+        assert!(print_workflow_jobs(&jobs, false).is_ok());
+        assert!(print_workflow_jobs(&jobs, true).is_ok());
+    }
+
+    #[test]
+    fn print_pipeline_workflows_empty_smoke() {
+        assert!(print_pipeline_workflows(&[], false).is_ok());
+    }
+
+    #[test]
+    fn print_pipeline_workflows_one_item_smoke() {
+        let wfs = vec![PipelineWorkflow {
+            id: "wf-1".to_string(),
+            name: "deploy".to_string(),
+            status: "running".to_string(),
+            created_at: Some("2024-01-01T00:00:00Z".to_string()),
+            stopped_at: None,
+            pipeline_number: Some(99),
+        }];
+        assert!(print_pipeline_workflows(&wfs, false).is_ok());
+        assert!(print_pipeline_workflows(&wfs, true).is_ok());
     }
 }
