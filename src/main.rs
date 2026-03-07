@@ -79,7 +79,7 @@ async fn run_job_log(
     json: bool,
 ) -> Result<()> {
     let grep_re = grep
-        .map(|pattern| Regex::new(pattern).context("無効な正規表現パターン"))
+        .map(|pattern| Regex::new(pattern).context("Invalid regex pattern"))
         .transpose()?;
 
     let detail = client.fetch_job_detail(job_number).await?;

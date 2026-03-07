@@ -25,9 +25,9 @@ impl Config {
             .as_ref()
             .map(|path| {
                 let content = fs::read_to_string(path)
-                    .with_context(|| format!("設定ファイルの読み込みに失敗: {}", path.display()))?;
+                    .with_context(|| format!("Failed to read config file: {}", path.display()))?;
                 let config: ConfigFile =
-                    toml::from_str(&content).context("設定ファイルのパースに失敗")?;
+                    toml::from_str(&content).context("Failed to parse config file")?;
                 Ok::<_, anyhow::Error>(config)
             })
             .transpose()?;
@@ -40,7 +40,7 @@ impl Config {
         let project_str = parsed
             .as_ref()
             .and_then(|c| c.project.clone())
-            .context("project が設定されていません。.circleci-logs.toml の project フィールドを設定してください (例: github/org/repo)")?;
+            .context("Missing 'project' field. Set it in .circleci-logs.toml (e.g. github/org/repo)")?;
 
         let (vcs_type, org, repo) = parse_project(&project_str)?;
 
@@ -73,13 +73,13 @@ fn find_config_file() -> Option<PathBuf> {
 fn resolve_token(env_token: Option<String>, file_token: Option<String>) -> Result<String> {
     env_token
         .or(file_token)
-        .context("トークンが見つかりません。環境変数 CIRCLE_TOKEN または .circleci-logs.toml の token を設定してください")
+        .context("Token not found. Set CIRCLE_TOKEN env var or 'token' in .circleci-logs.toml")
 }
 
 fn parse_project(project: &str) -> Result<(String, String, String)> {
     let parts: Vec<&str> = project.split('/').collect();
     if parts.len() != 3 {
-        bail!("project は 'vcs_type/org/repo' の形式で指定してください (例: github/myorg/myrepo)");
+        bail!("'project' must be in 'vcs_type/org/repo' format (e.g. github/myorg/myrepo)");
     }
     Ok((
         parts[0].to_string(),
