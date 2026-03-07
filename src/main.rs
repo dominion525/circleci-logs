@@ -4,7 +4,7 @@ mod models;
 mod output;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 use regex::Regex;
 
 use api::CircleCiClient;
@@ -13,19 +13,21 @@ use config::Config;
 #[derive(Parser)]
 #[command(
     name = "circleci-logs",
-    about = "Fetch job logs and workflow info from CircleCI"
+    about = "Fetch job logs and workflow info from CircleCI",
+    arg_required_else_help = true,
+    group = ArgGroup::new("target").required(true)
 )]
 struct Cli {
     /// Fetch job log by job number
-    #[arg(short = 'j', long = "jid")]
+    #[arg(short = 'j', long = "jid", group = "target")]
     job_number: Option<u64>,
 
     /// List jobs in a workflow by workflow ID
-    #[arg(short = 'w', long = "wid")]
+    #[arg(short = 'w', long = "wid", group = "target")]
     workflow_id: Option<String>,
 
     /// List workflows in a pipeline by pipeline number
-    #[arg(short = 'p', long = "pid")]
+    #[arg(short = 'p', long = "pid", group = "target")]
     pipeline_number: Option<u64>,
 
     /// Output in JSON format
@@ -44,11 +46,6 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-
-    if cli.job_number.is_none() && cli.workflow_id.is_none() && cli.pipeline_number.is_none() {
-        Cli::parse_from(["circleci-logs", "--help"]);
-        return Ok(());
-    }
 
     let config = Config::load()?;
     let client = CircleCiClient::new(config);
