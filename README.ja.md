@@ -162,6 +162,34 @@ JOB#     NAME                           STATUS       STARTED              STOPPE
 
 - `--json` — JSON 形式で出力
 
+### 対話モード (`-i` / `--interactive`)
+
+パイプライン → ワークフロー → ジョブ → ログ を階層的に選択・表示する対話モードです。番号を調べる手間なく、ドリルダウンで目的のログにたどり着けます。
+
+```
+circleci-logs -i
+```
+
+URL と組み合わせると、途中の階層から開始できます。
+
+```
+# ワークフロー一覧からスタート
+circleci-logs -i "https://app.circleci.com/pipelines/github/org/repo/123"
+
+# ジョブ一覧からスタート
+circleci-logs -i "https://app.circleci.com/pipelines/github/org/repo/123/workflows/UUID"
+```
+
+操作:
+- 矢印キーで選択、Enter で決定
+- `.. (back)` を選択すると前の階層に戻る
+- `▼ Load more...` を選択すると追加データを読み込み
+- Esc で終了
+
+注意事項:
+- `-i` は `-j`/`-w`/`-p` および `--json`/`--errors-only`/`--grep`/`--tests`/`--failed-only`/`--fail-on-error` とは排他です
+- ターミナル（TTY）が必要です。パイプ入力では動作しません
+
 ### パイプラインのワークフロー一覧 (`-p` / `--pid`)
 
 パイプライン番号を指定して、そのパイプラインに含まれるワークフローの一覧を表示します。
