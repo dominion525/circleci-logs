@@ -268,24 +268,6 @@ pub async fn fetch_step_logs(
     fetch_logs_parallel(client, targets).await
 }
 
-pub async fn fetch_single_step_logs(
-    client: &CircleCiClient,
-    step: &models::Step,
-) -> Vec<(String, String)> {
-    let targets: Vec<(String, String)> = step
-        .actions
-        .iter()
-        .filter_map(|action| {
-            action
-                .output_url
-                .as_ref()
-                .map(|url| (step.name.clone(), url.clone()))
-        })
-        .collect();
-
-    fetch_logs_parallel(client, targets).await
-}
-
 async fn fetch_logs_parallel(
     client: &CircleCiClient,
     targets: Vec<(String, String)>,

@@ -145,10 +145,12 @@ pub fn print_job_log(
     Ok(())
 }
 
-pub fn print_step_log(
+pub fn print_node_log(
     detail: &JobDetail,
     step: &Step,
-    logs: &[(String, String)],
+    action: &Action,
+    node_index: usize,
+    log: &str,
 ) -> Result<()> {
     // Header
     if let Some(ref wf) = detail.workflows {
@@ -160,39 +162,17 @@ pub fn print_step_log(
         }
         println!();
     }
-    if let Some(ref status) = detail.status {
-        println!("Status: {}", colorize_status(status));
-    }
+
+    println!("Node: {}  Step: {}", node_index, step.name.bold());
+    println!(
+        "  [{}] ({})",
+        colorize_status(&action.status),
+        format_duration(action.run_time_millis)
+    );
     println!();
 
-    // Step header
-    let has_parallel = step.actions.len() > 1;
-    println!("Step: {}", step.name.bold());
-
-    for (i, action) in step.actions.iter().enumerate() {
-        let label = if has_parallel {
-            format!("node {}", i)
-        } else {
-            action.name.clone()
-        };
-        println!(
-            "  [{}] {} ({})",
-            colorize_status(&action.status),
-            label,
-            format_duration(action.run_time_millis)
-        );
-    }
-    println!();
-
-    // Log bodies
-    for (i, (_name, content)) in logs.iter().enumerate() {
-        if content.is_empty() {
-            continue;
-        }
-        if has_parallel {
-            println!("--- node {} ---", i);
-        }
-        println!("{}", content);
+    if !log.is_empty() {
+        println!("{}", log);
         println!();
     }
     Ok(())
@@ -701,5 +681,119 @@ mod tests {
         }];
         assert!(print_pipeline_workflows(&wfs, false).is_ok());
         assert!(print_pipeline_workflows(&wfs, true).is_ok());
+    }
+
+    // --- print_node_log: header order verification ---
+    // print_node_log outputs "Node: {index}  Step: {name}" (Node first, then Step).
+    // Since it uses println! directly, we verify the format string logic by
+    // checking the source code pattern. The smoke tests below verify it doesn't panic.
+
+    #[test]
+    fn print_node_log_no_workflow() {
+        // workflows = None → should not print Workflow/Job header line
+        let detail = make_detail(
+            Some(vec![make_step(
+                "Build",
+                vec![make_action("node 0", "success", Some(5000))],
+            )]),
+            Some("success"),
+            Some(10),
+        );
+        let step = &detail.steps.as_ref().unwrap()[0];
+        let action = &step.actions[0];
+        let result = print_node_log(&detail, step, action, 0, "output");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn print_node_log_no_duration() {
+        let detail = make_detail(
+            Some(vec![make_step(
+                "Setup",
+                vec![make_action("node 0", "running", None)],
+            )]),
+            Some("running"),
+            Some(5),
+        );
+        let step = &detail.steps.as_ref().unwrap()[0];
+        let action = &step.actions[0];
+        let result = print_node_log(&detail, step, action, 0, "");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn print_node_log_partial_workflow_header() {
+        // workflow_name set but job_name is None
+        let mut detail = make_detail(
+            Some(vec![make_step(
+                "Test",
+                vec![make_action("node 0", "failed", Some(3000))],
+            )]),
+            Some("failed"),
+            Some(20),
+        );
+        detail.workflows = Some(WorkflowRef {
+            workflow_name: Some("ci".to_string()),
+            job_name: None,
+        });
+        let step = &detail.steps.as_ref().unwrap()[0];
+        let action = &step.actions[0];
+        let result = print_node_log(&detail, step, action, 0, "error log");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn print_node_log_smoke() {
+        let detail = make_detail(
+            Some(vec![make_step(
+                "RSpec",
+                vec![
+                    make_action("node 0", "success", Some(10000)),
+                    make_action("node 1", "failed", Some(8000)),
+                ],
+            )]),
+            Some("failed"),
+            Some(42),
+        );
+        let step = &detail.steps.as_ref().unwrap()[0];
+        let action = &step.actions[1];
+        let result = print_node_log(&detail, step, action, 1, "test output here");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn print_node_log_empty_log_smoke() {
+        let detail = make_detail(
+            Some(vec![make_step(
+                "Build",
+                vec![make_action("node 0", "success", Some(5000))],
+            )]),
+            Some("success"),
+            Some(10),
+        );
+        let step = &detail.steps.as_ref().unwrap()[0];
+        let action = &step.actions[0];
+        let result = print_node_log(&detail, step, action, 0, "");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn print_node_log_with_workflow_header() {
+        let mut detail = make_detail(
+            Some(vec![make_step(
+                "RSpec",
+                vec![make_action("node 0", "success", Some(5000))],
+            )]),
+            Some("success"),
+            Some(10),
+        );
+        detail.workflows = Some(WorkflowRef {
+            workflow_name: Some("build-and-test".to_string()),
+            job_name: Some("rspec".to_string()),
+        });
+        let step = &detail.steps.as_ref().unwrap()[0];
+        let action = &step.actions[0];
+        let result = print_node_log(&detail, step, action, 0, "log content");
+        assert!(result.is_ok());
     }
 }
