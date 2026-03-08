@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 // --- v1.1 API: Job detail ---
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct JobDetail {
     pub steps: Option<Vec<Step>>,
     pub status: Option<String>,
@@ -10,20 +10,20 @@ pub struct JobDetail {
     pub workflows: Option<WorkflowRef>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct WorkflowRef {
     pub workflow_name: Option<String>,
     pub job_name: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Step {
     pub name: String,
     pub actions: Vec<Action>,
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Action {
     pub name: String,
     pub status: String,
