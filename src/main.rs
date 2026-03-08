@@ -59,6 +59,10 @@ struct Cli {
     #[arg(long)]
     failed_only: bool,
 
+    /// Output SKILL.md content for AI agent integration
+    #[arg(long)]
+    help_skill: bool,
+
     /// CircleCI URL (e.g. https://app.circleci.com/pipelines/github/org/repo/123/workflows/UUID/jobs/456)
     url: Option<String>,
 }
@@ -66,6 +70,12 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // --help-skill: output embedded SKILL.md and exit (no config/token needed)
+    if cli.help_skill {
+        print!("{}", include_str!("../SKILL.md"));
+        return Ok(());
+    }
 
     // Validate at least one target is specified
     if cli.job_number.is_none()
@@ -836,5 +846,27 @@ mod tests {
         let result = run_job_log(&client, 42, false, Some("[invalid"), false, false).await;
         let err = result.unwrap_err();
         assert!(err.to_string().contains("Invalid regex pattern"));
+    }
+
+    // --- help_skill tests ---
+
+    #[test]
+    fn help_skill_contains_frontmatter() {
+        let content = include_str!("../SKILL.md");
+        assert!(content.contains("name: circleci-logs"));
+    }
+
+    #[test]
+    fn help_skill_flag_accepted_by_parser() {
+        // --help-skill should parse successfully without any other target flags
+        let cli = Cli::try_parse_from(["circleci-logs", "--help-skill"]).unwrap();
+        assert!(cli.help_skill);
+    }
+
+    #[test]
+    fn help_skill_with_other_flags() {
+        // --help-skill should be accepted even alongside -j (early exit takes priority)
+        let cli = Cli::try_parse_from(["circleci-logs", "--help-skill", "-j", "123"]).unwrap();
+        assert!(cli.help_skill);
     }
 }
