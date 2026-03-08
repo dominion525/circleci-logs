@@ -41,17 +41,23 @@ struct Cli {
     /// Filter log lines by regex pattern (requires -j)
     #[arg(long)]
     grep: Option<String>,
+
+    /// Exit with code 1 if the job has errors (requires -j)
+    #[arg(long)]
+    fail_on_error: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    if cli.job_number.is_none() && (cli.errors_only || cli.grep.is_some()) {
+    if cli.job_number.is_none() && (cli.errors_only || cli.grep.is_some() || cli.fail_on_error) {
         let flag = if cli.errors_only {
             "--errors-only"
-        } else {
+        } else if cli.grep.is_some() {
             "--grep"
+        } else {
+            "--fail-on-error"
         };
         anyhow::bail!("{} can only be used with -j/--jid", flag);
     }
@@ -60,14 +66,18 @@ async fn main() -> Result<()> {
     let client = CircleCiClient::new(config);
 
     if let Some(job_number) = cli.job_number {
-        run_job_log(
+        let has_error = run_job_log(
             &client,
             job_number,
             cli.errors_only,
             cli.grep.as_deref(),
             cli.json,
+            cli.fail_on_error,
         )
         .await?;
+        if has_error {
+            std::process::exit(1);
+        }
     } else if let Some(ref workflow_id) = cli.workflow_id {
         run_workflow_jobs(&client, workflow_id, cli.json).await?;
     } else if let Some(pipeline_number) = cli.pipeline_number {
@@ -83,7 +93,8 @@ async fn run_job_log(
     errors_only: bool,
     grep: Option<&str>,
     json: bool,
-) -> Result<()> {
+    fail_on_error: bool,
+) -> Result<bool> {
     let grep_re = grep
         .map(|pattern| Regex::new(pattern).context("Invalid regex pattern"))
         .transpose()?;
@@ -92,7 +103,10 @@ async fn run_job_log(
     let logs = fetch_step_logs(client, &detail, errors_only).await;
 
     output::print_job_log(&detail, &logs, errors_only, grep_re.as_ref(), json)?;
-    Ok(())
+
+    let has_error = fail_on_error
+        && detail.status.as_deref().is_some_and(|s| s != "success");
+    Ok(has_error)
 }
 
 async fn fetch_step_logs(
@@ -348,15 +362,81 @@ mod tests {
             .mount(&server)
             .await;
 
-        let result = run_job_log(&client, 42, false, None, false).await;
-        assert!(result.is_ok());
+        let result = run_job_log(&client, 42, false, None, false, false).await;
+        assert_eq!(result.unwrap(), false);
+    }
+
+    #[tokio::test]
+    async fn run_job_log_fail_on_error_success_status() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        let job_detail = serde_json::json!({
+            "steps": [],
+            "status": "success",
+            "build_num": 10
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1.1/project/gh/test-org/test-repo/10"))
+            .and(header("Circle-Token", "test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&job_detail))
+            .mount(&server)
+            .await;
+
+        let result = run_job_log(&client, 10, false, None, false, true).await;
+        assert_eq!(result.unwrap(), false);
+    }
+
+    #[tokio::test]
+    async fn run_job_log_fail_on_error_failed_status() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        let job_detail = serde_json::json!({
+            "steps": [],
+            "status": "failed",
+            "build_num": 11
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1.1/project/gh/test-org/test-repo/11"))
+            .and(header("Circle-Token", "test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&job_detail))
+            .mount(&server)
+            .await;
+
+        let result = run_job_log(&client, 11, false, None, false, true).await;
+        assert_eq!(result.unwrap(), true);
+    }
+
+    #[tokio::test]
+    async fn run_job_log_no_fail_on_error_failed_status() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        let job_detail = serde_json::json!({
+            "steps": [],
+            "status": "failed",
+            "build_num": 12
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1.1/project/gh/test-org/test-repo/12"))
+            .and(header("Circle-Token", "test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&job_detail))
+            .mount(&server)
+            .await;
+
+        let result = run_job_log(&client, 12, false, None, false, false).await;
+        assert_eq!(result.unwrap(), false);
     }
 
     #[tokio::test]
     async fn run_job_log_invalid_grep() {
         let client = CircleCiClient::with_base_url(test_config(), "http://unused:9999".to_string());
 
-        let result = run_job_log(&client, 42, false, Some("[invalid"), false).await;
+        let result = run_job_log(&client, 42, false, Some("[invalid"), false, false).await;
         let err = result.unwrap_err();
         assert!(err.to_string().contains("Invalid regex pattern"));
     }

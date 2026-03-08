@@ -83,6 +83,10 @@ FAILED src/app.test.ts:42
   circleci-logs -j 4504 --grep "error"
   ```
 - `--json` — JSON 形式で出力
+- `--fail-on-error` — ジョブにエラーがある場合、終了コード 1 で終了
+  ```
+  circleci-logs -j 4504 --fail-on-error
+  ```
 
 ### ワークフローのジョブ一覧 (`-w` / `--wid`)
 
