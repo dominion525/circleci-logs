@@ -23,6 +23,12 @@ enum State {
         pipeline_number: u64,
         pipeline_id: String,
     },
+    Steps {
+        job_number: u64,
+        workflow_id: String,
+        pipeline_number: u64,
+        pipeline_id: String,
+    },
     Done,
 }
 
@@ -63,6 +69,16 @@ pub async fn run_interactive(client: &CircleCiClient, start: InteractiveStart) -
                 let wid = workflow_id.clone();
                 let pid = pipeline_id.clone();
                 state = select_job(client, &wid, pipeline_number, &pid).await?;
+            }
+            State::Steps {
+                job_number,
+                ref workflow_id,
+                pipeline_number,
+                ref pipeline_id,
+            } => {
+                let wid = workflow_id.clone();
+                let pid = pipeline_id.clone();
+                state = select_step(client, job_number, &wid, pipeline_number, &pid).await?;
             }
             State::Done => break,
         }
@@ -223,27 +239,84 @@ async fn select_job(
 
         let job = &items[selection - 1];
         if let Some(job_number) = job.job_number {
-            if !show_job_log(client, job_number).await? {
-                return Ok(State::Done); // Esc pressed — exit
-            }
+            return Ok(State::Steps {
+                job_number,
+                workflow_id: workflow_id.to_string(),
+                pipeline_number,
+                pipeline_id: pipeline_id.to_string(),
+            });
         } else {
             println!("This job has no job number (may be pending or blocked).");
         }
-        // Stay in job list after showing log
         continue;
     }
 }
 
-/// Show job log with a pause. Returns `true` to go back, `false` to exit.
-async fn show_job_log(client: &CircleCiClient, job_number: u64) -> Result<bool> {
+async fn select_step(
+    client: &CircleCiClient,
+    job_number: u64,
+    workflow_id: &str,
+    pipeline_number: u64,
+    pipeline_id: &str,
+) -> Result<State> {
     let detail = client.fetch_job_detail(job_number).await?;
-    let logs = crate::fetch_step_logs(client, &detail, false).await;
-    crate::output::print_job_log(&detail, &logs, false, None, false)?;
 
-    println!();
+    let steps = match detail.steps {
+        Some(ref steps) => steps,
+        None => {
+            println!("No steps found for this job.");
+            return Ok(State::Jobs {
+                workflow_id: workflow_id.to_string(),
+                pipeline_number,
+                pipeline_id: pipeline_id.to_string(),
+            });
+        }
+    };
+
+    loop {
+        let mut labels: Vec<String> = vec![".. (back)".to_string()];
+        labels.extend(steps.iter().map(format_step_item));
+
+        let selection = Select::new()
+            .with_prompt("Select a step")
+            .items(&labels)
+            .default(0)
+            .interact_opt()?;
+
+        let selection = match selection {
+            Some(s) => s,
+            None => return Ok(State::Done),
+        };
+
+        // back
+        if selection == 0 {
+            return Ok(State::Jobs {
+                workflow_id: workflow_id.to_string(),
+                pipeline_number,
+                pipeline_id: pipeline_id.to_string(),
+            });
+        }
+
+        let step = &steps[selection - 1];
+        if !show_step_log(client, &detail, step).await? {
+            return Ok(State::Done);
+        }
+        // Stay in step list after viewing log
+        continue;
+    }
+}
+
+async fn show_step_log(
+    client: &CircleCiClient,
+    detail: &JobDetail,
+    step: &Step,
+) -> Result<bool> {
+    let logs = crate::fetch_single_step_logs(client, step).await;
+    crate::output::print_step_log(detail, step, &logs)?;
+
     let selection = Select::new()
         .with_prompt("Log view")
-        .items(&["Back to job list", "Exit"])
+        .items(&["Back to step list", "Exit"])
         .default(0)
         .clear(false)
         .interact_opt()?;
@@ -254,16 +327,58 @@ async fn show_job_log(client: &CircleCiClient, job_number: u64) -> Result<bool> 
     }
 }
 
-fn colorize_status(status: &str) -> String {
-    match status {
-        "success" | "created" => status.green().to_string(),
-        "failed" | "failure" | "timedout" | "infrastructure_fail" | "error" => {
-            status.red().to_string()
+fn format_step_item(step: &Step) -> String {
+    let actions = &step.actions;
+
+    // Aggregate status: if any failed, show failed
+    let status = if actions.iter().any(|a| a.status == "failed" || a.status == "timedout") {
+        "failed"
+    } else if actions.iter().all(|a| a.status == "success") {
+        "success"
+    } else if actions.iter().any(|a| a.status == "running") {
+        "running"
+    } else {
+        actions.first().map(|a| a.status.as_str()).unwrap_or("-")
+    };
+
+    // Total duration across all actions
+    let total_millis: Option<u64> = {
+        let sum: u64 = actions.iter().filter_map(|a| a.run_time_millis).sum();
+        if sum > 0 || actions.iter().any(|a| a.run_time_millis.is_some()) {
+            Some(sum)
+        } else {
+            None
         }
-        "running" => status.yellow().to_string(),
-        "canceled" | "cancelled" => status.dimmed().to_string(),
-        "not_run" | "skipped" => status.dimmed().to_string(),
-        _ => status.to_string(),
+    };
+
+    let duration = crate::output::format_duration(total_millis);
+    let parallel = if actions.len() > 1 {
+        format!(" (x{})", actions.len())
+    } else {
+        String::new()
+    };
+
+    format!(
+        "[{}] {:<40} {}{}",
+        colorize_status_padded(status, 7),
+        step.name,
+        duration,
+        parallel
+    )
+}
+
+/// Pad status to `width` visible characters, then colorize.
+fn colorize_status_padded(status: &str, width: usize) -> String {
+    let padded = format!("{:<width$}", status, width = width);
+    match status {
+        "success" | "created" => padded.green().to_string(),
+        "failed" | "failure" | "timedout" | "infrastructure_fail" | "error" => {
+            padded.red().to_string()
+        }
+        "running" => padded.yellow().to_string(),
+        "canceled" | "cancelled" => padded.dimmed().to_string(),
+        "not_run" | "skipped" => padded.dimmed().to_string(),
+        _ => padded,
     }
 }
 
@@ -290,10 +405,10 @@ fn format_pipeline_item(p: &Pipeline) -> String {
         .map(format_timestamp)
         .unwrap_or_else(|| "-".to_string());
     format!(
-        "#{:<8} {:<20} {:<12} {}",
+        "#{:<8} {:<30} {} {}",
         p.number,
         branch,
-        colorize_status(state),
+        colorize_status_padded(state, 12),
         created
     )
 }
@@ -305,9 +420,9 @@ fn format_workflow_item(wf: &PipelineWorkflow) -> String {
         .map(format_timestamp)
         .unwrap_or_else(|| "-".to_string());
     format!(
-        "{:<25} {:<12} {}",
+        "{:<25} {} {}",
         wf.name,
-        colorize_status(&wf.status),
+        colorize_status_padded(&wf.status, 12),
         created
     )
 }
@@ -323,10 +438,10 @@ fn format_job_item(job: &WorkflowJob) -> String {
         .map(format_timestamp)
         .unwrap_or_else(|| "-".to_string());
     format!(
-        "{:<8} {:<25} {:<12} {}",
+        "{:<8} {:<25} {} {}",
         num,
         job.name,
-        colorize_status(&job.status),
+        colorize_status_padded(&job.status, 12),
         started
     )
 }
@@ -444,6 +559,102 @@ mod tests {
         let result = format_job_item(&job);
         assert!(result.contains("-"));
         assert!(result.contains("pending-job"));
+    }
+
+    fn make_action(name: &str, status: &str, millis: Option<u64>) -> Step {
+        Step {
+            name: name.to_string(),
+            actions: vec![Action {
+                name: name.to_string(),
+                status: status.to_string(),
+                run_time_millis: millis,
+                output_url: None,
+                step: None,
+                index: None,
+            }],
+        }
+    }
+
+    fn make_step_with_actions(name: &str, actions: Vec<Action>) -> Step {
+        Step {
+            name: name.to_string(),
+            actions,
+        }
+    }
+
+    #[test]
+    fn format_step_item_success_single() {
+        colored::control::set_override(false);
+        let step = make_action("Build", "success", Some(5000));
+        let result = format_step_item(&step);
+        assert!(result.contains("success"));
+        assert!(result.contains("Build"));
+        assert!(result.contains("5s"));
+        assert!(!result.contains("(x"));
+    }
+
+    #[test]
+    fn format_step_item_failed_single() {
+        colored::control::set_override(false);
+        let step = make_action("Test", "failed", Some(12000));
+        let result = format_step_item(&step);
+        assert!(result.contains("failed"));
+        assert!(result.contains("12s"));
+    }
+
+    #[test]
+    fn format_step_item_parallel() {
+        colored::control::set_override(false);
+        let actions = (0..6)
+            .map(|i| Action {
+                name: format!("node {}", i),
+                status: "success".to_string(),
+                run_time_millis: Some(10000),
+                output_url: None,
+                step: None,
+                index: Some(i),
+            })
+            .collect();
+        let step = make_step_with_actions("RSpec", actions);
+        let result = format_step_item(&step);
+        assert!(result.contains("(x6)"));
+        assert!(result.contains("1m0s")); // 60s total
+    }
+
+    #[test]
+    fn format_step_item_parallel_with_failure() {
+        colored::control::set_override(false);
+        let actions = vec![
+            Action {
+                name: "node 0".to_string(),
+                status: "success".to_string(),
+                run_time_millis: Some(5000),
+                output_url: None,
+                step: None,
+                index: Some(0),
+            },
+            Action {
+                name: "node 1".to_string(),
+                status: "failed".to_string(),
+                run_time_millis: Some(3000),
+                output_url: None,
+                step: None,
+                index: Some(1),
+            },
+        ];
+        let step = make_step_with_actions("Test", actions);
+        let result = format_step_item(&step);
+        assert!(result.contains("failed"));
+        assert!(result.contains("(x2)"));
+        assert!(result.contains("8s"));
+    }
+
+    #[test]
+    fn format_step_item_no_duration() {
+        colored::control::set_override(false);
+        let step = make_action("Setup", "success", None);
+        let result = format_step_item(&step);
+        assert!(result.contains("-"));
     }
 
     #[test]

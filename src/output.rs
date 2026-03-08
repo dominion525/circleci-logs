@@ -34,7 +34,7 @@ fn filter_log_lines(content: &str, grep: Option<&Regex>) -> String {
     }
 }
 
-fn format_duration(millis: Option<u64>) -> String {
+pub fn format_duration(millis: Option<u64>) -> String {
     match millis {
         Some(ms) => {
             let secs = ms / 1000;
@@ -141,6 +141,59 @@ pub fn print_job_log(
             println!("{}", filtered);
             println!();
         }
+    }
+    Ok(())
+}
+
+pub fn print_step_log(
+    detail: &JobDetail,
+    step: &Step,
+    logs: &[(String, String)],
+) -> Result<()> {
+    // Header
+    if let Some(ref wf) = detail.workflows {
+        if let Some(ref wf_name) = wf.workflow_name {
+            print!("Workflow: {}  ", wf_name);
+        }
+        if let Some(ref job_name) = wf.job_name {
+            print!("Job: {}  ", job_name);
+        }
+        println!();
+    }
+    if let Some(ref status) = detail.status {
+        println!("Status: {}", colorize_status(status));
+    }
+    println!();
+
+    // Step header
+    let has_parallel = step.actions.len() > 1;
+    println!("Step: {}", step.name.bold());
+
+    for (i, action) in step.actions.iter().enumerate() {
+        let label = if has_parallel {
+            format!("node {}", i)
+        } else {
+            action.name.clone()
+        };
+        println!(
+            "  [{}] {} ({})",
+            colorize_status(&action.status),
+            label,
+            format_duration(action.run_time_millis)
+        );
+    }
+    println!();
+
+    // Log bodies
+    for (i, (_name, content)) in logs.iter().enumerate() {
+        if content.is_empty() {
+            continue;
+        }
+        if has_parallel {
+            println!("--- node {} ---", i);
+        }
+        println!("{}", content);
+        println!();
     }
     Ok(())
 }
