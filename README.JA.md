@@ -98,10 +98,10 @@ circleci-logs -w <WORKFLOW_ID>
 $ circleci-logs -w a1b2c3d4-5678-90ab-cdef-1234567890ab
 JOB#     NAME                           STATUS       STARTED              STOPPED
 ------------------------------------------------------------------------------------------
-4501     lint                           success      2025-01-15T10:00:05Z 2025-01-15T10:00:38Z
-4502     build                          success      2025-01-15T10:00:06Z 2025-01-15T10:00:30Z
-4503     unit-test                      success      2025-01-15T10:00:32Z 2025-01-15T10:04:15Z
-4504     integration-test               failed       2025-01-15T10:04:18Z 2025-01-15T10:08:42Z
+4501     lint                           success      2025-01-15 19:00:05  2025-01-15 19:00:38
+4502     build                          success      2025-01-15 19:00:06  2025-01-15 19:00:30
+4503     unit-test                      success      2025-01-15 19:00:32  2025-01-15 19:04:15
+4504     integration-test               failed       2025-01-15 19:04:18  2025-01-15 19:08:42
 4505     deploy                         canceled     -                    -
 ```
 
@@ -123,8 +123,8 @@ circleci-logs -p <PIPELINE_NUMBER>
 $ circleci-logs -p 142
 WORKFLOW ID                            NAME                      STATUS       CREATED              STOPPED
 -------------------------------------------------------------------------------------------------------------------
-a1b2c3d4-5678-90ab-cdef-1234567890ab   build-and-test            failed       2025-01-15T10:00:01Z 2025-01-15T10:08:42Z
-b2c3d4e5-6789-01bc-defa-234567890abc   deploy                    canceled     2025-01-15T10:00:01Z 2025-01-15T10:08:45Z
+a1b2c3d4-5678-90ab-cdef-1234567890ab   build-and-test            failed       2025-01-15 19:00:01  2025-01-15 19:08:42
+b2c3d4e5-6789-01bc-defa-234567890abc   deploy                    canceled     2025-01-15 19:00:01  2025-01-15 19:08:45
 ```
 
 オプション:

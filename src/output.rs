@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::{DateTime, Local};
 use colored::Colorize;
 use regex::Regex;
 
@@ -11,6 +12,13 @@ fn colorize_status(status: &str) -> String {
         "running" => status.yellow().to_string(),
         "canceled" | "cancelled" => status.dimmed().to_string(),
         _ => status.to_string(),
+    }
+}
+
+fn format_timestamp(ts: &str) -> String {
+    match DateTime::parse_from_rfc3339(ts) {
+        Ok(dt) => dt.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string(),
+        Err(_) => ts.to_string(),
     }
 }
 
@@ -152,8 +160,8 @@ pub fn print_workflow_jobs(jobs: &[WorkflowJob], json: bool) -> Result<()> {
             .job_number
             .map(|n| n.to_string())
             .unwrap_or_else(|| "-".to_string());
-        let started = job.started_at.as_deref().unwrap_or("-");
-        let stopped = job.stopped_at.as_deref().unwrap_or("-");
+        let started = job.started_at.as_deref().map(format_timestamp).unwrap_or_else(|| "-".to_string());
+        let stopped = job.stopped_at.as_deref().map(format_timestamp).unwrap_or_else(|| "-".to_string());
         println!(
             "{:<8} {:<30} {:<12} {:<20} {:<20}",
             job_num,
@@ -178,8 +186,8 @@ pub fn print_pipeline_workflows(workflows: &[PipelineWorkflow], json: bool) -> R
     );
     println!("{}", "-".repeat(115));
     for wf in workflows {
-        let created = wf.created_at.as_deref().unwrap_or("-");
-        let stopped = wf.stopped_at.as_deref().unwrap_or("-");
+        let created = wf.created_at.as_deref().map(format_timestamp).unwrap_or_else(|| "-".to_string());
+        let stopped = wf.stopped_at.as_deref().map(format_timestamp).unwrap_or_else(|| "-".to_string());
         println!(
             "{:<38} {:<25} {:<12} {:<20} {:<20}",
             wf.id,
@@ -195,6 +203,21 @@ pub fn print_pipeline_workflows(workflows: &[PipelineWorkflow], json: bool) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_timestamp_valid_utc() {
+        let result = format_timestamp("2025-01-15T10:00:05Z");
+        // Should parse successfully and produce local time in YYYY-MM-DD HH:MM:SS format
+        assert!(DateTime::parse_from_rfc3339("2025-01-15T10:00:05Z").is_ok());
+        assert!(result.contains("2025-01-15") || result.contains("2025-01-16"));
+        assert!(result.len() == 19); // "YYYY-MM-DD HH:MM:SS"
+    }
+
+    #[test]
+    fn format_timestamp_invalid() {
+        assert_eq!(format_timestamp("not-a-date"), "not-a-date");
+        assert_eq!(format_timestamp(""), "");
+    }
 
     #[test]
     fn format_duration_none() {
