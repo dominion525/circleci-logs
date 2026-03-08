@@ -8,9 +8,10 @@ use crate::models::*;
 fn colorize_status(status: &str) -> String {
     match status {
         "success" => status.green().to_string(),
-        "failed" | "timedout" | "infrastructure_fail" => status.red().to_string(),
+        "failed" | "failure" | "timedout" | "infrastructure_fail" => status.red().to_string(),
         "running" => status.yellow().to_string(),
         "canceled" | "cancelled" => status.dimmed().to_string(),
+        "skipped" => status.dimmed().to_string(),
         _ => status.to_string(),
     }
 }
@@ -174,6 +175,130 @@ pub fn print_workflow_jobs(jobs: &[WorkflowJob], json: bool) -> Result<()> {
     Ok(())
 }
 
+fn format_run_time(secs: Option<f64>) -> String {
+    match secs {
+        None => "-".to_string(),
+        Some(s) => {
+            if s >= 60.0 {
+                let mins = s as u64 / 60;
+                let remainder = s - (mins as f64 * 60.0);
+                format!("{}m{:.3}s", mins, remainder)
+            } else {
+                format!("{:.3}s", s)
+            }
+        }
+    }
+}
+
+pub fn print_test_results(
+    tests: &[TestResult],
+    job_number: u64,
+    failed_only: bool,
+    json: bool,
+) -> Result<()> {
+    if json {
+        let output: Vec<&TestResult> = if failed_only {
+            tests
+                .iter()
+                .filter(|t| {
+                    matches!(t.result.as_deref(), Some("failure") | Some("failed"))
+                })
+                .collect()
+        } else {
+            tests.iter().collect()
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    let filtered: Vec<&TestResult> = if failed_only {
+        tests
+            .iter()
+            .filter(|t| matches!(t.result.as_deref(), Some("failure") | Some("failed")))
+            .collect()
+    } else {
+        tests.iter().collect()
+    };
+
+    println!("Test Results: Job #{}\n", job_number);
+
+    println!(
+        "{:<10} {:<10} {:<30} {}",
+        "RESULT", "TIME", "FILE", "NAME"
+    );
+    println!("{}", "-".repeat(90));
+
+    for t in &filtered {
+        let result_str = t.result.as_deref().unwrap_or("-");
+        let time_str = format_run_time(t.run_time);
+        let file_str = t.file.as_deref().unwrap_or("-");
+        let name_str = t.name.as_deref().unwrap_or("-");
+        println!(
+            "{:<10} {:<10} {:<30} {}",
+            colorize_status(result_str),
+            time_str,
+            file_str,
+            name_str
+        );
+    }
+
+    // Failed tests detail section
+    let failed: Vec<&&TestResult> = filtered
+        .iter()
+        .filter(|t| matches!(t.result.as_deref(), Some("failure") | Some("failed")))
+        .filter(|t| t.message.as_ref().is_some_and(|m| !m.is_empty()))
+        .collect();
+
+    if !failed.is_empty() {
+        println!("\n--- Failed Tests ---");
+        for t in &failed {
+            let name = t.name.as_deref().unwrap_or("-");
+            let result_str = t.result.as_deref().unwrap_or("failed");
+            println!("\n[{}] {}", colorize_status(result_str), name);
+            if let Some(ref file) = t.file {
+                println!("  File:  {}", file);
+            }
+            if let Some(ref classname) = t.classname {
+                println!("  Class: {}", classname);
+            }
+            if let Some(ref message) = t.message {
+                println!();
+                for line in message.lines() {
+                    println!("  {}", line);
+                }
+            }
+        }
+    }
+
+    // Summary (always computed from all tests, not filtered)
+    let mut passed = 0u64;
+    let mut failed_count = 0u64;
+    let mut skipped = 0u64;
+    let mut total_time = 0.0f64;
+
+    for t in tests {
+        match t.result.as_deref() {
+            Some("success") => passed += 1,
+            Some("failure") | Some("failed") => failed_count += 1,
+            Some("skipped") => skipped += 1,
+            _ => {}
+        }
+        if let Some(rt) = t.run_time {
+            total_time += rt;
+        }
+    }
+
+    println!(
+        "\nSummary: {} passed, {} failed, {} skipped ({})",
+        passed,
+        failed_count,
+        skipped,
+        format_run_time(Some(total_time))
+    );
+
+    Ok(())
+}
+
 pub fn print_pipeline_workflows(workflows: &[PipelineWorkflow], json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(workflows)?);
@@ -249,8 +374,10 @@ mod tests {
         colored::control::set_override(false);
         assert_eq!(colorize_status("success"), "success");
         assert_eq!(colorize_status("failed"), "failed");
+        assert_eq!(colorize_status("failure"), "failure");
         assert_eq!(colorize_status("running"), "running");
         assert_eq!(colorize_status("cancelled"), "cancelled");
+        assert_eq!(colorize_status("skipped"), "skipped");
         assert_eq!(colorize_status("queued"), "queued");
     }
 
@@ -423,6 +550,85 @@ mod tests {
         }];
         assert!(print_workflow_jobs(&jobs, false).is_ok());
         assert!(print_workflow_jobs(&jobs, true).is_ok());
+    }
+
+    // --- format_run_time tests ---
+
+    #[test]
+    fn format_run_time_none() {
+        assert_eq!(format_run_time(None), "-");
+    }
+
+    #[test]
+    fn format_run_time_sub_second() {
+        assert_eq!(format_run_time(Some(0.437)), "0.437s");
+    }
+
+    #[test]
+    fn format_run_time_seconds() {
+        assert_eq!(format_run_time(Some(5.0)), "5.000s");
+    }
+
+    #[test]
+    fn format_run_time_minutes() {
+        assert_eq!(format_run_time(Some(125.3)), "2m5.300s");
+    }
+
+    #[test]
+    fn format_run_time_zero() {
+        assert_eq!(format_run_time(Some(0.0)), "0.000s");
+    }
+
+    // --- print_test_results tests ---
+
+    fn make_test_result(
+        name: &str,
+        result: &str,
+        run_time: Option<f64>,
+        message: Option<&str>,
+        file: Option<&str>,
+        classname: Option<&str>,
+    ) -> TestResult {
+        TestResult {
+            name: Some(name.to_string()),
+            classname: classname.map(|s| s.to_string()),
+            result: Some(result.to_string()),
+            message: message.map(|s| s.to_string()),
+            run_time,
+            source: None,
+            file: file.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn print_test_results_text_smoke() {
+        let tests = vec![
+            make_test_result("test1", "success", Some(0.5), None, Some("a.rb"), None),
+            make_test_result("test2", "failure", Some(0.1), Some("Expected true"), Some("b.rb"), Some("AuthSpec")),
+        ];
+        assert!(print_test_results(&tests, 42, false, false).is_ok());
+    }
+
+    #[test]
+    fn print_test_results_json_smoke() {
+        let tests = vec![
+            make_test_result("test1", "success", Some(0.5), None, None, None),
+        ];
+        assert!(print_test_results(&tests, 42, false, true).is_ok());
+    }
+
+    #[test]
+    fn print_test_results_failed_only_smoke() {
+        let tests = vec![
+            make_test_result("pass", "success", Some(0.5), None, None, None),
+            make_test_result("fail", "failure", Some(0.1), Some("bad"), None, None),
+        ];
+        assert!(print_test_results(&tests, 42, true, false).is_ok());
+    }
+
+    #[test]
+    fn print_test_results_empty_smoke() {
+        assert!(print_test_results(&[], 42, false, false).is_ok());
     }
 
     #[test]
