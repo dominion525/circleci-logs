@@ -164,27 +164,88 @@ JOB#     NAME                           STATUS       STARTED              STOPPE
 
 ### 対話モード (`-i` / `--interactive`)
 
-パイプライン → ワークフロー → ジョブ → ログ を階層的に選択・表示する対話モードです。番号を調べる手間なく、ドリルダウンで目的のログにたどり着けます。
+パイプライン → ワークフロー → ジョブ → ステップ → ログ を TUI で階層的にたどれるモードです。番号や UUID を調べる手間なく、選ぶだけで目的のログにたどり着けます。
 
 ```
 circleci-logs -i
 ```
 
-URL と組み合わせると、途中の階層から開始できます。
+#### パイプライン → ワークフロー → ジョブ
 
 ```
-# ワークフロー一覧からスタート
-circleci-logs -i "https://app.circleci.com/pipelines/github/org/repo/123"
+? Select a pipeline
+> #1042     main                           created      2025-03-08 14:32:01
+  #1041     feat/new-feature               created      2025-03-08 13:15:42
+  #1040     main                           created      2025-03-07 22:08:11
 
-# ジョブ一覧からスタート
+? Select a job
+  .. (back to workflows)
+  #5678     rspec                success      2025-03-08 14:32:10
+  #5679     lint                 success      2025-03-08 14:32:08
+> #5680     e2e                  failed       2025-03-08 14:33:01
+  .. (back to workflows)
+```
+
+#### 並列ジョブのノード選択
+
+並列実行（`parallelism > 1`）のジョブでは、CircleCI の Web UI と同様にノード一覧が表示されます。
+各ノードの集約ステータスと合計実行時間が確認できます。
+
+```
+? Select a node
+  .. (back to jobs)
+> node 0    [success] 2m30s
+  node 1    [failed ] 1m45s
+  node 2    [success] 2m12s
+  .. (back to jobs)
+```
+
+ノードを選ぶと、そのノードだけのステップ一覧が表示されます。
+
+```
+? Select a step
+  .. (back to nodes)
+  [success] Spin up environment              5s
+  [success] Checkout code                    2s
+> [failed ] RSpec                            1m38s
+  [success] Upload results                   3s
+  .. (back to nodes)
+```
+
+非並列ジョブの場合はノード選択をスキップして、直接ステップ一覧に入ります。
+
+#### ログ表示
+
+ステップを選択するとログが表示されます。
+
+```
+Node: 1  Step: RSpec
+  [failed ] (1m38s)
+
+FAILED spec/models/user_spec.rb:42
+  Expected: 200
+  Received: 500
+
+? Log view
+> Back to steps
+  Exit
+```
+
+#### 操作方法
+
+- ↑↓ キーで選択、Enter で決定
+- 各リストの上下に戻り先付きの back があります（例: `.. (back to jobs)`）
+- `▼ Load more...` で追加データの読み込み
+- Esc で終了
+
+#### URL からの途中開始
+
+URL を渡すと途中の階層から開始できます。
+
+```
+circleci-logs -i "https://app.circleci.com/pipelines/github/org/repo/123"
 circleci-logs -i "https://app.circleci.com/pipelines/github/org/repo/123/workflows/UUID"
 ```
-
-操作:
-- 矢印キーで選択、Enter で決定
-- `.. (back)` を選択すると前の階層に戻る
-- `▼ Load more...` を選択すると追加データを読み込み
-- Esc で終了
 
 注意事項:
 - `-i` は `-j`/`-w`/`-p` および `--json`/`--errors-only`/`--grep`/`--tests`/`--failed-only`/`--fail-on-error` とは排他です
