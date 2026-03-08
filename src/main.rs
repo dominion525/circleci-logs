@@ -45,38 +45,79 @@ struct Cli {
     /// Exit with code 1 if the job has errors (requires -j)
     #[arg(long)]
     fail_on_error: bool,
+
+    /// Show test results (requires -j)
+    #[arg(long)]
+    tests: bool,
+
+    /// Show only failed tests (requires --tests)
+    #[arg(long)]
+    failed_only: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    if cli.job_number.is_none() && (cli.errors_only || cli.grep.is_some() || cli.fail_on_error) {
+    if cli.job_number.is_none()
+        && (cli.errors_only || cli.grep.is_some() || cli.fail_on_error || cli.tests || cli.failed_only)
+    {
         let flag = if cli.errors_only {
             "--errors-only"
         } else if cli.grep.is_some() {
             "--grep"
-        } else {
+        } else if cli.fail_on_error {
             "--fail-on-error"
+        } else if cli.tests {
+            "--tests"
+        } else {
+            "--failed-only"
         };
         anyhow::bail!("{} can only be used with -j/--jid", flag);
+    }
+
+    if cli.failed_only && !cli.tests {
+        anyhow::bail!("--failed-only can only be used with --tests");
+    }
+
+    if cli.tests && (cli.errors_only || cli.grep.is_some()) {
+        let flag = if cli.errors_only {
+            "--errors-only"
+        } else {
+            "--grep"
+        };
+        anyhow::bail!("--tests cannot be used with {}", flag);
     }
 
     let config = Config::load()?;
     let client = CircleCiClient::new(config);
 
     if let Some(job_number) = cli.job_number {
-        let has_error = run_job_log(
-            &client,
-            job_number,
-            cli.errors_only,
-            cli.grep.as_deref(),
-            cli.json,
-            cli.fail_on_error,
-        )
-        .await?;
-        if has_error {
-            std::process::exit(1);
+        if cli.tests {
+            let has_error = run_job_tests(
+                &client,
+                job_number,
+                cli.failed_only,
+                cli.json,
+                cli.fail_on_error,
+            )
+            .await?;
+            if has_error {
+                std::process::exit(1);
+            }
+        } else {
+            let has_error = run_job_log(
+                &client,
+                job_number,
+                cli.errors_only,
+                cli.grep.as_deref(),
+                cli.json,
+                cli.fail_on_error,
+            )
+            .await?;
+            if has_error {
+                std::process::exit(1);
+            }
         }
     } else if let Some(ref workflow_id) = cli.workflow_id {
         run_workflow_jobs(&client, workflow_id, cli.json).await?;
@@ -140,6 +181,33 @@ async fn fetch_step_logs(
         logs.push((step_name.clone(), content));
     }
     logs
+}
+
+async fn run_job_tests(
+    client: &CircleCiClient,
+    job_number: u64,
+    failed_only: bool,
+    json: bool,
+    fail_on_error: bool,
+) -> Result<bool> {
+    let tests = client.fetch_job_tests(job_number).await?;
+
+    if tests.is_empty() {
+        if json {
+            println!("[]");
+        } else {
+            println!("No test results found. (Does the job use store_test_results?)");
+        }
+        return Ok(false);
+    }
+
+    output::print_test_results(&tests, job_number, failed_only, json)?;
+
+    let has_error = fail_on_error
+        && tests.iter().any(|t| {
+            matches!(t.result.as_deref(), Some("failure") | Some("failed"))
+        });
+    Ok(has_error)
 }
 
 async fn run_workflow_jobs(client: &CircleCiClient, workflow_id: &str, json: bool) -> Result<()> {
@@ -429,6 +497,88 @@ mod tests {
             .await;
 
         let result = run_job_log(&client, 12, false, None, false, false).await;
+        assert_eq!(result.unwrap(), false);
+    }
+
+    // --- run_job_tests tests ---
+
+    #[tokio::test]
+    async fn run_job_tests_with_results() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/project/gh/test-org/test-repo/42/tests"))
+            .and(header("Circle-Token", "test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [
+                    {"name": "t1", "classname": null, "result": "success", "message": null, "run_time": 0.5, "source": null, "file": null},
+                    {"name": "t2", "classname": null, "result": "failure", "message": "bad", "run_time": 0.1, "source": null, "file": null}
+                ],
+                "next_page_token": null
+            })))
+            .mount(&server)
+            .await;
+
+        let result = run_job_tests(&client, 42, false, false, false).await;
+        assert_eq!(result.unwrap(), false);
+    }
+
+    #[tokio::test]
+    async fn run_job_tests_empty() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/project/gh/test-org/test-repo/99/tests"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [],
+                "next_page_token": null
+            })))
+            .mount(&server)
+            .await;
+
+        let result = run_job_tests(&client, 99, false, false, false).await;
+        assert_eq!(result.unwrap(), false);
+    }
+
+    #[tokio::test]
+    async fn run_job_tests_fail_on_error_with_failure() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/project/gh/test-org/test-repo/10/tests"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [
+                    {"name": "t1", "classname": null, "result": "failure", "message": "err", "run_time": 0.1, "source": null, "file": null}
+                ],
+                "next_page_token": null
+            })))
+            .mount(&server)
+            .await;
+
+        let result = run_job_tests(&client, 10, false, false, true).await;
+        assert_eq!(result.unwrap(), true);
+    }
+
+    #[tokio::test]
+    async fn run_job_tests_fail_on_error_all_pass() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/project/gh/test-org/test-repo/10/tests"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [
+                    {"name": "t1", "classname": null, "result": "success", "message": null, "run_time": 0.5, "source": null, "file": null}
+                ],
+                "next_page_token": null
+            })))
+            .mount(&server)
+            .await;
+
+        let result = run_job_tests(&client, 10, false, false, true).await;
         assert_eq!(result.unwrap(), false);
     }
 

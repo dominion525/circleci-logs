@@ -90,6 +90,40 @@ impl CircleCiClient {
         Ok(aggregate_action_outputs(outputs))
     }
 
+    // --- v2: Job test results ---
+
+    pub async fn fetch_job_tests(&self, job_number: u64) -> Result<Vec<TestResult>> {
+        let slug = self.config.project_slug();
+        let mut all_tests = Vec::new();
+        let mut page_token: Option<String> = None;
+        loop {
+            let mut url = format!(
+                "{}/api/v2/project/{}/{}/tests",
+                self.base_url, slug, job_number
+            );
+            if let Some(ref token) = page_token {
+                url.push_str(&format!("?page-token={}", token));
+            }
+            let (header, value) = self.auth_header();
+            let resp = self
+                .client
+                .get(&url)
+                .header(header, value)
+                .send()
+                .await
+                .context("Failed to fetch job tests")?;
+            let resp = Self::check_response(resp).await?;
+            let data: TestResultsResponse =
+                resp.json().await.context("Failed to parse job tests")?;
+            all_tests.extend(data.items);
+            match data.next_page_token {
+                Some(token) if !token.is_empty() => page_token = Some(token),
+                _ => break,
+            }
+        }
+        Ok(all_tests)
+    }
+
     // --- v2: Workflow jobs ---
 
     pub async fn fetch_workflow_jobs(&self, workflow_id: &str) -> Result<Vec<WorkflowJob>> {
@@ -345,6 +379,82 @@ mod tests {
         let output_url = format!("{}/output", server.uri());
         let err = client.fetch_action_output(&output_url).await.unwrap_err();
         assert!(err.to_string().contains("Failed to parse action output"));
+    }
+
+    // --- fetch_job_tests tests ---
+
+    #[tokio::test]
+    async fn fetch_job_tests_single_page() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        let body = serde_json::json!({
+            "items": [
+                {"name": "test1", "classname": "Suite", "result": "success", "message": null, "run_time": 0.5, "source": "rspec", "file": "spec/a.rb"}
+            ],
+            "next_page_token": null
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/project/gh/test-org/test-repo/42/tests"))
+            .and(header("Circle-Token", "test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tests = client.fetch_job_tests(42).await.unwrap();
+        assert_eq!(tests.len(), 1);
+        assert_eq!(tests[0].name.as_deref(), Some("test1"));
+        assert_eq!(tests[0].run_time, Some(0.5));
+    }
+
+    #[tokio::test]
+    async fn fetch_job_tests_pagination() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/project/gh/test-org/test-repo/10/tests"))
+            .and(query_param("page-token", "page2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [{"name": "t2", "classname": null, "result": "failure", "message": "fail", "run_time": null, "source": null, "file": null}],
+                "next_page_token": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/project/gh/test-org/test-repo/10/tests"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [{"name": "t1", "classname": null, "result": "success", "message": null, "run_time": 1.0, "source": null, "file": null}],
+                "next_page_token": "page2"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tests = client.fetch_job_tests(10).await.unwrap();
+        assert_eq!(tests.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn fetch_job_tests_empty() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/project/gh/test-org/test-repo/99/tests"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [],
+                "next_page_token": null
+            })))
+            .mount(&server)
+            .await;
+
+        let tests = client.fetch_job_tests(99).await.unwrap();
+        assert!(tests.is_empty());
     }
 
     // --- fetch_workflow_jobs tests ---

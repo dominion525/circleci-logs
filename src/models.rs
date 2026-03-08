@@ -61,6 +61,25 @@ pub struct WorkflowJob {
     pub stopped_at: Option<String>,
 }
 
+// --- v2 API: Job test results ---
+
+#[derive(Debug, Deserialize)]
+pub struct TestResultsResponse {
+    pub items: Vec<TestResult>,
+    pub next_page_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct TestResult {
+    pub name: Option<String>,
+    pub classname: Option<String>,
+    pub result: Option<String>,
+    pub message: Option<String>,
+    pub run_time: Option<f64>,
+    pub source: Option<String>,
+    pub file: Option<String>,
+}
+
 // --- v2 API: Pipeline ---
 
 #[derive(Debug, Deserialize)]
@@ -142,6 +161,57 @@ mod tests {
         assert_eq!(wf.status, "running");
         assert_eq!(wf.pipeline_number, Some(42));
         assert!(wf.stopped_at.is_none());
+    }
+
+    #[test]
+    fn deserialize_test_result_full() {
+        let json = r#"{
+            "name": "test_login",
+            "classname": "AuthSpec",
+            "result": "failure",
+            "message": "Expected true got false",
+            "run_time": 0.437,
+            "source": "rspec",
+            "file": "spec/auth_spec.rb"
+        }"#;
+        let tr: TestResult = serde_json::from_str(json).unwrap();
+        assert_eq!(tr.name.as_deref(), Some("test_login"));
+        assert_eq!(tr.classname.as_deref(), Some("AuthSpec"));
+        assert_eq!(tr.result.as_deref(), Some("failure"));
+        assert_eq!(tr.message.as_deref(), Some("Expected true got false"));
+        assert_eq!(tr.run_time, Some(0.437));
+        assert_eq!(tr.source.as_deref(), Some("rspec"));
+        assert_eq!(tr.file.as_deref(), Some("spec/auth_spec.rb"));
+    }
+
+    #[test]
+    fn deserialize_test_result_all_null() {
+        let json = r#"{
+            "name": null,
+            "classname": null,
+            "result": null,
+            "message": null,
+            "run_time": null,
+            "source": null,
+            "file": null
+        }"#;
+        let tr: TestResult = serde_json::from_str(json).unwrap();
+        assert!(tr.name.is_none());
+        assert!(tr.run_time.is_none());
+    }
+
+    #[test]
+    fn deserialize_test_results_response() {
+        let json = r#"{
+            "items": [
+                {"name": "t1", "classname": null, "result": "success", "message": null, "run_time": 1.5, "source": null, "file": null}
+            ],
+            "next_page_token": "tok2"
+        }"#;
+        let resp: TestResultsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.items.len(), 1);
+        assert_eq!(resp.items[0].name.as_deref(), Some("t1"));
+        assert_eq!(resp.next_page_token.as_deref(), Some("tok2"));
     }
 
     #[test]

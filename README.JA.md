@@ -87,6 +87,40 @@ FAILED src/app.test.ts:42
   ```
   circleci-logs -j 4504 --fail-on-error
   ```
+- `--tests` — テスト結果を表示（`store_test_results` を使っているジョブ向け）
+  ```
+  circleci-logs -j 4504 --tests
+  ```
+- `--failed-only` — 失敗テストのみ表示（`--tests` と併用）
+  ```
+  circleci-logs -j 4504 --tests --failed-only
+  ```
+
+`--tests` の出力例:
+
+```
+$ circleci-logs -j 4504 --tests
+Test Results: Job #4504
+
+RESULT     TIME       FILE                           NAME
+------------------------------------------------------------------------------------------
+success    0.437s     tests/user.rb                  User.create validates email
+failure    0.052s     tests/auth.rb                  Auth.login rejects invalid token
+skipped    -          tests/legacy.rb                Legacy.import is deprecated
+
+--- Failed Tests ---
+
+[failure] Auth.login rejects invalid token
+  File:  tests/auth.rb
+  Class: spec.auth
+
+  Expected true but got false
+  at line 42 in auth_spec.rb
+
+Summary: 1 passed, 1 failed, 1 skipped (0.489s)
+```
+
+`--tests` と `--errors-only`/`--grep` は排他で、同時には使えません。
 
 ### ワークフローのジョブ一覧 (`-w` / `--wid`)
 
