@@ -322,6 +322,14 @@ chmod 600 .circleci-logs.toml
 echo '.circleci-logs.toml' >> .gitignore
 ```
 
+## AI エージェント連携
+
+Claude Code 等の AI エージェントのスキルとして登録できます：
+
+```bash
+mkdir -p ~/.claude/skills/circleci-logs && circleci-logs --help-skill > ~/.claude/skills/circleci-logs/SKILL.md
+```
+
 ## ライセンス
 
 [MIT](LICENSE)
