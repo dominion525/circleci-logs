@@ -45,6 +45,21 @@ Pipeline (123)         1回のgit pushや定期実行で起動される単位
 | ワークフローのジョブ一覧 | `circleci-logs -w <UUID>` | URL 内の `.../workflows/<UUID>` |
 | パイプラインのワークフロー一覧 | `circleci-logs -p <番号>` | URL 末尾の `.../pipelines/.../123` |
 
+CircleCI Web UI の URL をそのまま渡すこともできます。URL の深さに応じて自動的にモードが選択されます。
+
+```
+# URL 末尾が /jobs/N → ジョブログを表示
+circleci-logs "https://app.circleci.com/pipelines/github/org/repo/123/workflows/UUID/jobs/456"
+
+# URL 末尾が /workflows/UUID → ジョブ一覧を表示
+circleci-logs "https://app.circleci.com/pipelines/github/org/repo/123/workflows/UUID"
+
+# URL 末尾がパイプライン番号 → ワークフロー一覧を表示
+circleci-logs "https://app.circleci.com/pipelines/github/org/repo/123"
+```
+
+URL 内のプロジェクト情報と設定ファイル（または git remote）のプロジェクトが異なる場合は、URL 側が優先されます（警告あり）。`--tests`, `--json` 等のオプションも URL と併用できます。
+
 全オプションは `circleci-logs --help` で確認できます。
 
 ### ジョブログの取得 (`-j` / `--jid`)

@@ -100,7 +100,7 @@
   - `--json` 対応
   - `store_test_results` 未使用のプロジェクトでは空結果を返す（エラーにはしない）
 
-- [ ] URL 入力サポート
+- [x] URL 入力サポート
   - CircleCI の URL を直接引数に渡せるようにする
   - `circleci-logs "https://circleci.com/gh/org/repo/12345"` → ジョブログ取得
   - `circleci-logs "https://app.circleci.com/pipelines/github/org/repo/123/workflows/abc/jobs/456"` → 同上

@@ -115,7 +115,7 @@ fn resolve_token(env_token: Option<String>, file_token: Option<String>) -> Resul
         .context("Token not found. Set CIRCLE_TOKEN env var or 'token' in .circleci-logs.toml")
 }
 
-fn normalize_vcs_type(vcs: &str) -> Result<String> {
+pub(crate) fn normalize_vcs_type(vcs: &str) -> Result<String> {
     match vcs {
         "gh" | "github" => Ok("gh".to_string()),
         "bb" | "bitbucket" => Ok("bb".to_string()),
