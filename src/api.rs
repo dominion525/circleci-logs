@@ -193,7 +193,7 @@ impl CircleCiClient {
         Ok(all_workflows)
     }
 
-    async fn find_pipeline_uuid(&self, pipeline_number: u64) -> Result<String> {
+    pub async fn find_pipeline_uuid(&self, pipeline_number: u64) -> Result<String> {
         let slug = self.config.project_slug();
         let mut page_token: Option<String> = None;
         loop {
@@ -222,6 +222,76 @@ impl CircleCiClient {
             }
         }
         bail!("Pipeline number {} not found", pipeline_number)
+    }
+
+    // --- Interactive mode: single-page fetch methods ---
+
+    pub async fn fetch_pipelines_page(
+        &self,
+        page_token: Option<&str>,
+    ) -> Result<PipelinesResponse> {
+        let slug = self.config.project_slug();
+        let mut url = format!("{}/api/v2/project/{}/pipeline", self.base_url, slug);
+        if let Some(token) = page_token {
+            url.push_str(&format!("?page-token={}", token));
+        }
+        let (header, value) = self.auth_header();
+        let resp = self
+            .client
+            .get(&url)
+            .header(header, value)
+            .send()
+            .await
+            .context("Failed to fetch pipelines")?;
+        let resp = Self::check_response(resp).await?;
+        resp.json().await.context("Failed to parse pipelines")
+    }
+
+    pub async fn fetch_workflow_jobs_page(
+        &self,
+        workflow_id: &str,
+        page_token: Option<&str>,
+    ) -> Result<WorkflowJobsResponse> {
+        let mut url = format!("{}/api/v2/workflow/{}/job", self.base_url, workflow_id);
+        if let Some(token) = page_token {
+            url.push_str(&format!("?page-token={}", token));
+        }
+        let (header, value) = self.auth_header();
+        let resp = self
+            .client
+            .get(&url)
+            .header(header, value)
+            .send()
+            .await
+            .context("Failed to fetch workflow jobs")?;
+        let resp = Self::check_response(resp).await?;
+        resp.json().await.context("Failed to parse workflow jobs")
+    }
+
+    pub async fn fetch_pipeline_workflows_page(
+        &self,
+        pipeline_id: &str,
+        page_token: Option<&str>,
+    ) -> Result<PipelineWorkflowsResponse> {
+        let mut url = format!(
+            "{}/api/v2/pipeline/{}/workflow",
+            self.base_url, pipeline_id
+        );
+        if let Some(token) = page_token {
+            url.push_str(&format!("?page-token={}", token));
+        }
+        let (header, value) = self.auth_header();
+        let resp = self
+            .client
+            .get(&url)
+            .header(header, value)
+            .send()
+            .await
+            .context("Failed to fetch pipeline workflows")?;
+        let resp = Self::check_response(resp).await?;
+        resp.json()
+            .await
+            .context("Failed to parse pipeline workflows")
     }
 }
 
@@ -548,6 +618,99 @@ mod tests {
         let workflows = client.fetch_pipeline_workflows(42).await.unwrap();
         assert_eq!(workflows.len(), 1);
         assert_eq!(workflows[0].name, "deploy");
+    }
+
+    // --- fetch_pipelines_page tests ---
+
+    #[tokio::test]
+    async fn fetch_pipelines_page_single() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/project/gh/test-org/test-repo/pipeline"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [
+                    {"id": "p1", "number": 1, "state": "created", "created_at": "2024-01-01T00:00:00Z"}
+                ],
+                "next_page_token": "tok2"
+            })))
+            .mount(&server)
+            .await;
+
+        let resp = client.fetch_pipelines_page(None).await.unwrap();
+        assert_eq!(resp.items.len(), 1);
+        assert_eq!(resp.items[0].number, 1);
+        assert_eq!(resp.next_page_token.as_deref(), Some("tok2"));
+    }
+
+    #[tokio::test]
+    async fn fetch_pipelines_page_empty() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/project/gh/test-org/test-repo/pipeline"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [],
+                "next_page_token": null
+            })))
+            .mount(&server)
+            .await;
+
+        let resp = client.fetch_pipelines_page(None).await.unwrap();
+        assert!(resp.items.is_empty());
+        assert!(resp.next_page_token.is_none());
+    }
+
+    // --- fetch_workflow_jobs_page tests ---
+
+    #[tokio::test]
+    async fn fetch_workflow_jobs_page_single() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/workflow/wf-abc/job"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [
+                    {"id": "j1", "name": "build", "status": "success", "job_number": 10, "type": "build", "started_at": null, "stopped_at": null}
+                ],
+                "next_page_token": null
+            })))
+            .mount(&server)
+            .await;
+
+        let resp = client.fetch_workflow_jobs_page("wf-abc", None).await.unwrap();
+        assert_eq!(resp.items.len(), 1);
+        assert_eq!(resp.items[0].name, "build");
+        assert!(resp.next_page_token.is_none());
+    }
+
+    // --- fetch_pipeline_workflows_page tests ---
+
+    #[tokio::test]
+    async fn fetch_pipeline_workflows_page_single() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/pipeline/pipe-xyz/workflow"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [
+                    {"id": "wf-1", "name": "deploy", "status": "success", "created_at": "2024-01-01T00:00:00Z", "stopped_at": null, "pipeline_number": 42}
+                ],
+                "next_page_token": null
+            })))
+            .mount(&server)
+            .await;
+
+        let resp = client
+            .fetch_pipeline_workflows_page("pipe-xyz", None)
+            .await
+            .unwrap();
+        assert_eq!(resp.items.len(), 1);
+        assert_eq!(resp.items[0].name, "deploy");
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 mod api;
 mod config;
+mod interactive;
 mod models;
 mod output;
 
@@ -15,7 +16,7 @@ use config::Config;
     name = "circleci-logs",
     about = "Fetch job logs and workflow info from CircleCI",
     arg_required_else_help = true,
-    group = ArgGroup::new("target").required(true)
+    group = ArgGroup::new("target")
 )]
 struct Cli {
     /// Fetch job log by job number
@@ -29,6 +30,10 @@ struct Cli {
     /// List workflows in a pipeline by pipeline number
     #[arg(short = 'p', long = "pid", group = "target")]
     pipeline_number: Option<u64>,
+
+    /// Interactive drill-down mode
+    #[arg(short = 'i', long, group = "target")]
+    interactive: bool,
 
     /// Output in JSON format
     #[arg(long)]
@@ -55,13 +60,51 @@ struct Cli {
     failed_only: bool,
 
     /// CircleCI URL (e.g. https://app.circleci.com/pipelines/github/org/repo/123/workflows/UUID/jobs/456)
-    #[arg(group = "target")]
     url: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Validate at least one target is specified
+    if cli.job_number.is_none()
+        && cli.workflow_id.is_none()
+        && cli.pipeline_number.is_none()
+        && !cli.interactive
+        && cli.url.is_none()
+    {
+        anyhow::bail!("One of -j, -w, -p, -i, or a URL must be specified");
+    }
+
+    // URL cannot be combined with -j/-w/-p (only with -i)
+    if cli.url.is_some()
+        && (cli.job_number.is_some() || cli.workflow_id.is_some() || cli.pipeline_number.is_some())
+    {
+        anyhow::bail!("URL cannot be used with -j, -w, or -p");
+    }
+
+    // Validate -i exclusivity
+    if cli.interactive
+        && (cli.json
+            || cli.errors_only
+            || cli.grep.is_some()
+            || cli.fail_on_error
+            || cli.tests
+            || cli.failed_only)
+    {
+        anyhow::bail!("-i/--interactive cannot be used with --json, --errors-only, --grep, --tests, --failed-only, or --fail-on-error");
+    }
+
+    // TTY check for interactive mode
+    if cli.interactive {
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() {
+            anyhow::bail!(
+                "Interactive mode requires a terminal. Use -j/-w/-p for non-interactive mode."
+            );
+        }
+    }
 
     // Resolve target from URL or flags
     let (job_number, workflow_id, pipeline_number, url_config) = if let Some(ref url) = cli.url {
@@ -124,6 +167,27 @@ async fn main() -> Result<()> {
 
     let client = CircleCiClient::new(config);
 
+    if cli.interactive {
+        let start = if let Some(ref url) = cli.url {
+            let parsed = parse_circleci_url(url)?;
+            if parsed.workflow_id.is_some() {
+                interactive::InteractiveStart::Jobs {
+                    workflow_id: parsed.workflow_id.unwrap(),
+                }
+            } else if let Some(pn) = parsed.pipeline_number {
+                interactive::InteractiveStart::Workflows {
+                    pipeline_number: pn,
+                }
+            } else {
+                interactive::InteractiveStart::Pipelines
+            }
+        } else {
+            interactive::InteractiveStart::Pipelines
+        };
+        interactive::run_interactive(&client, start).await?;
+        return Ok(());
+    }
+
     if let Some(job_number) = job_number {
         if cli.tests {
             let has_error = run_job_tests(
@@ -182,7 +246,7 @@ async fn run_job_log(
     Ok(has_error)
 }
 
-async fn fetch_step_logs(
+pub async fn fetch_step_logs(
     client: &CircleCiClient,
     detail: &models::JobDetail,
     errors_only: bool,

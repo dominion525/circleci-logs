@@ -95,6 +95,21 @@ pub struct Pipeline {
     pub number: u64,
     pub state: Option<String>,
     pub created_at: Option<String>,
+    #[serde(default)]
+    pub trigger: Option<PipelineTrigger>,
+    #[serde(default)]
+    pub vcs: Option<PipelineVcs>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PipelineTrigger {
+    #[serde(rename = "type")]
+    pub trigger_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PipelineVcs {
+    pub branch: Option<String>,
 }
 
 // --- v2 API: Pipeline workflows ---
@@ -227,6 +242,39 @@ mod tests {
         assert!(detail.status.is_none());
         assert!(detail.build_num.is_none());
         assert!(detail.workflows.is_none());
+    }
+
+    #[test]
+    fn deserialize_pipeline_with_trigger_and_vcs() {
+        let json = r#"{
+            "id": "pipe-123",
+            "number": 42,
+            "state": "created",
+            "created_at": "2024-01-01T00:00:00Z",
+            "trigger": {"type": "webhook"},
+            "vcs": {"branch": "main"}
+        }"#;
+        let p: Pipeline = serde_json::from_str(json).unwrap();
+        assert_eq!(p.number, 42);
+        assert_eq!(
+            p.trigger.as_ref().unwrap().trigger_type.as_deref(),
+            Some("webhook")
+        );
+        assert_eq!(p.vcs.as_ref().unwrap().branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn deserialize_pipeline_without_trigger_and_vcs() {
+        let json = r#"{
+            "id": "pipe-456",
+            "number": 99,
+            "state": "created",
+            "created_at": null
+        }"#;
+        let p: Pipeline = serde_json::from_str(json).unwrap();
+        assert_eq!(p.number, 99);
+        assert!(p.trigger.is_none());
+        assert!(p.vcs.is_none());
     }
 
     #[test]
