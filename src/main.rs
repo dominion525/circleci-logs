@@ -265,18 +265,54 @@ pub async fn fetch_step_logs(
         }
     }
 
-    let mut logs = Vec::new();
-    for (step_name, url) in &targets {
-        let content = match client.fetch_action_output(url).await {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("Warning: failed to fetch log for '{}': {}", step_name, e);
-                String::new()
-            }
-        };
-        logs.push((step_name.clone(), content));
-    }
-    logs
+    fetch_logs_parallel(client, targets).await
+}
+
+pub async fn fetch_single_step_logs(
+    client: &CircleCiClient,
+    step: &models::Step,
+) -> Vec<(String, String)> {
+    let targets: Vec<(String, String)> = step
+        .actions
+        .iter()
+        .filter_map(|action| {
+            action
+                .output_url
+                .as_ref()
+                .map(|url| (step.name.clone(), url.clone()))
+        })
+        .collect();
+
+    fetch_logs_parallel(client, targets).await
+}
+
+async fn fetch_logs_parallel(
+    client: &CircleCiClient,
+    targets: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    use futures::stream::{self, StreamExt};
+
+    let fetches = targets
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (step_name, url))| async move {
+            let content = match client.fetch_action_output(&url).await {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Warning: failed to fetch log for '{}': {}", step_name, e);
+                    String::new()
+                }
+            };
+            (idx, step_name, content)
+        });
+
+    let mut results: Vec<(usize, String, String)> =
+        stream::iter(fetches).buffer_unordered(8).collect().await;
+    results.sort_by_key(|(idx, _, _)| *idx);
+    results
+        .into_iter()
+        .map(|(_, name, content)| (name, content))
+        .collect()
 }
 
 async fn run_job_tests(

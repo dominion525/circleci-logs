@@ -77,13 +77,28 @@ impl CircleCiClient {
 
     pub async fn fetch_action_output(&self, output_url: &str) -> Result<String> {
         let (header, value) = self.auth_header();
-        let resp = self
-            .client
-            .get(output_url)
-            .header(header, value)
-            .send()
-            .await
-            .context("Failed to fetch action output")?;
+        let mut retries = 0u32;
+        let resp = loop {
+            let resp = self
+                .client
+                .get(output_url)
+                .header(header, value)
+                .send()
+                .await
+                .context("Failed to fetch action output")?;
+            if resp.status().as_u16() == 429 && retries < 3 {
+                let wait_secs = resp
+                    .headers()
+                    .get("Retry-After")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(1);
+                tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+                retries += 1;
+                continue;
+            }
+            break resp;
+        };
         let resp = Self::check_response(resp).await?;
         let outputs: Vec<ActionOutput> =
             resp.json().await.context("Failed to parse action output")?;
@@ -433,6 +448,51 @@ mod tests {
         let output_url = format!("{}/output", server.uri());
         let result = client.fetch_action_output(&output_url).await.unwrap();
         assert_eq!(result, "line 1\nline 2\n");
+    }
+
+    #[tokio::test]
+    async fn fetch_action_output_retries_on_429() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        // Mount 200 response first (lower priority)
+        Mock::given(method("GET"))
+            .and(path("/output/retry"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!([{"message": "ok\n", "type": "out"}])),
+            )
+            .mount(&server)
+            .await;
+
+        // Mount 429 response second (higher priority, consumed once)
+        Mock::given(method("GET"))
+            .and(path("/output/retry"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        let output_url = format!("{}/output/retry", server.uri());
+        let result = client.fetch_action_output(&output_url).await.unwrap();
+        assert_eq!(result, "ok\n");
+    }
+
+    #[tokio::test]
+    async fn fetch_action_output_429_exhausts_retries() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        // Always return 429
+        Mock::given(method("GET"))
+            .and(path("/output/always429"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+            .mount(&server)
+            .await;
+
+        let output_url = format!("{}/output/always429", server.uri());
+        let err = client.fetch_action_output(&output_url).await.unwrap_err();
+        assert!(err.to_string().contains("Rate limited"));
     }
 
     #[tokio::test]
