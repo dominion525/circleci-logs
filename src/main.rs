@@ -14,6 +14,7 @@ use config::Config;
 #[derive(Parser)]
 #[command(
     name = "circleci-logs",
+    version,
     about = "Fetch job logs and workflow info from CircleCI",
     arg_required_else_help = true,
     group = ArgGroup::new("target")
