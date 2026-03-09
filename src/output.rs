@@ -5,18 +5,20 @@ use regex::Regex;
 
 use crate::models::*;
 
-fn colorize_status(status: &str) -> String {
+pub fn colorize_status(status: &str) -> String {
     match status {
-        "success" => status.green().to_string(),
-        "failed" | "failure" | "timedout" | "infrastructure_fail" => status.red().to_string(),
+        "success" | "created" => status.green().to_string(),
+        "failed" | "failure" | "timedout" | "infrastructure_fail" | "error" => {
+            status.red().to_string()
+        }
         "running" => status.yellow().to_string(),
         "canceled" | "cancelled" => status.dimmed().to_string(),
-        "skipped" => status.dimmed().to_string(),
+        "not_run" | "skipped" => status.dimmed().to_string(),
         _ => status.to_string(),
     }
 }
 
-fn format_timestamp(ts: &str) -> String {
+pub fn format_timestamp(ts: &str) -> String {
     match DateTime::parse_from_rfc3339(ts) {
         Ok(dt) => dt
             .with_timezone(&Local)
@@ -420,10 +422,19 @@ mod tests {
     fn colorize_status_values() {
         colored::control::set_override(false);
         assert_eq!(colorize_status("success"), "success");
+        assert_eq!(colorize_status("created"), "created");
         assert_eq!(colorize_status("failed"), "failed");
         assert_eq!(colorize_status("failure"), "failure");
+        assert_eq!(colorize_status("timedout"), "timedout");
+        assert_eq!(
+            colorize_status("infrastructure_fail"),
+            "infrastructure_fail"
+        );
+        assert_eq!(colorize_status("error"), "error");
         assert_eq!(colorize_status("running"), "running");
+        assert_eq!(colorize_status("canceled"), "canceled");
         assert_eq!(colorize_status("cancelled"), "cancelled");
+        assert_eq!(colorize_status("not_run"), "not_run");
         assert_eq!(colorize_status("skipped"), "skipped");
         assert_eq!(colorize_status("queued"), "queued");
     }
