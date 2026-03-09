@@ -12,7 +12,7 @@ description: Fetch CircleCI job logs, test results, workflow status, and pipelin
 
 > **WARNING**: Job logs can be thousands of lines. **Always** use `--errors-only` or `--grep` with `-j` to avoid flooding the context window. Never fetch full logs without filtering.
 
-Always use `--json` for machine-readable output.
+Use `--json` when programmatically processing the output (e.g. extracting failed jobs, filtering results). For simple status checks, plain text is more token-efficient.
 
 | Goal                          | Command                                                |
 |-------------------------------|--------------------------------------------------------|
