@@ -14,6 +14,7 @@ use config::Config;
 #[derive(Parser)]
 #[command(
     name = "circleci-logs",
+    version,
     about = "Fetch job logs and workflow info from CircleCI",
     arg_required_else_help = true,
     group = ArgGroup::new("target")
@@ -293,7 +294,7 @@ async fn fetch_logs_parallel(
     client: &CircleCiClient,
     targets: Vec<(String, String)>,
 ) -> Vec<(String, String)> {
-    use futures::stream::{self, StreamExt};
+    use futures_util::stream::{self, StreamExt};
 
     let fetches = targets
         .into_iter()
@@ -623,7 +624,7 @@ mod tests {
             .await;
 
         let result = run_job_log(&client, 42, false, None, false, false).await;
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
     }
 
     #[tokio::test]
@@ -645,7 +646,7 @@ mod tests {
             .await;
 
         let result = run_job_log(&client, 10, false, None, false, true).await;
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
     }
 
     #[tokio::test]
@@ -689,7 +690,7 @@ mod tests {
             .await;
 
         let result = run_job_log(&client, 12, false, None, false, false).await;
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
     }
 
     // --- run_job_tests tests ---
@@ -713,7 +714,7 @@ mod tests {
             .await;
 
         let result = run_job_tests(&client, 42, false, false, false).await;
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
     }
 
     #[tokio::test]
@@ -731,7 +732,7 @@ mod tests {
             .await;
 
         let result = run_job_tests(&client, 99, false, false, false).await;
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
     }
 
     #[tokio::test]
@@ -771,7 +772,7 @@ mod tests {
             .await;
 
         let result = run_job_tests(&client, 10, false, false, true).await;
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
     }
 
     // --- parse_circleci_url tests ---
