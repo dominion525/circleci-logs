@@ -2,6 +2,7 @@
 name = "circleci-logs"
 version = "0.2.0"
 edition = "2024"
+rust-version = "1.87.0"
 description = "CLI tool for fetching CircleCI job logs, test results, and workflow info"
 license = "MIT"
 repository = "https://github.com/dominion525/circleci-logs"
