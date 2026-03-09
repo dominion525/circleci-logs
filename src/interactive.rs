@@ -493,14 +493,11 @@ fn aggregate_node_status(steps: &[Step], node_index: usize) -> String {
         .map(|a| a.status.as_str())
         .collect();
 
-    if statuses
-        .iter()
-        .any(|s| *s == "failed" || *s == "timedout")
-    {
+    if statuses.iter().any(|s| *s == "failed" || *s == "timedout") {
         "failed".to_string()
     } else if statuses.iter().all(|s| *s == "success") {
         "success".to_string()
-    } else if statuses.iter().any(|s| *s == "running") {
+    } else if statuses.contains(&"running") {
         "running".to_string()
     } else {
         statuses.first().copied().unwrap_or("-").to_string()
@@ -511,6 +508,7 @@ fn aggregate_node_duration(steps: &[Step], node_index: usize) -> Option<u64> {
     let mut sum: u64 = 0;
     let mut any = false;
     for step in steps {
+        #[allow(clippy::collapsible_if)]
         if let Some(action) = step.actions.get(node_index) {
             if let Some(ms) = action.run_time_millis {
                 sum += ms;
@@ -518,11 +516,7 @@ fn aggregate_node_duration(steps: &[Step], node_index: usize) -> Option<u64> {
             }
         }
     }
-    if any {
-        Some(sum)
-    } else {
-        None
-    }
+    if any { Some(sum) } else { None }
 }
 
 // --- Format helpers ---
@@ -793,10 +787,8 @@ mod tests {
     #[test]
     fn format_step_item_success() {
         colored::control::set_override(false);
-        let step = make_step_with_actions(
-            "Build",
-            vec![make_action("Build", "success", Some(5000))],
-        );
+        let step =
+            make_step_with_actions("Build", vec![make_action("Build", "success", Some(5000))]);
         let result = format_step_item(&step);
         assert!(result.contains("success"));
         assert!(result.contains("Build"));
@@ -806,10 +798,7 @@ mod tests {
     #[test]
     fn format_step_item_failed() {
         colored::control::set_override(false);
-        let step = make_step_with_actions(
-            "Test",
-            vec![make_action("Test", "failed", Some(12000))],
-        );
+        let step = make_step_with_actions("Test", vec![make_action("Test", "failed", Some(12000))]);
         let result = format_step_item(&step);
         assert!(result.contains("failed"));
         assert!(result.contains("12s"));
@@ -818,10 +807,7 @@ mod tests {
     #[test]
     fn format_step_item_no_duration() {
         colored::control::set_override(false);
-        let step = make_step_with_actions(
-            "Setup",
-            vec![make_action("Setup", "success", None)],
-        );
+        let step = make_step_with_actions("Setup", vec![make_action("Setup", "success", None)]);
         let result = format_step_item(&step);
         assert!(result.contains("-"));
     }
@@ -931,14 +917,8 @@ mod tests {
     #[test]
     fn aggregate_status_all_success() {
         let steps = vec![
-            make_step_with_actions(
-                "s1",
-                vec![make_action("n0", "success", None)],
-            ),
-            make_step_with_actions(
-                "s2",
-                vec![make_action("n0", "success", None)],
-            ),
+            make_step_with_actions("s1", vec![make_action("n0", "success", None)]),
+            make_step_with_actions("s2", vec![make_action("n0", "success", None)]),
         ];
         assert_eq!(aggregate_node_status(&steps, 0), "success");
     }
@@ -946,14 +926,8 @@ mod tests {
     #[test]
     fn aggregate_status_any_failed() {
         let steps = vec![
-            make_step_with_actions(
-                "s1",
-                vec![make_action("n0", "success", None)],
-            ),
-            make_step_with_actions(
-                "s2",
-                vec![make_action("n0", "failed", None)],
-            ),
+            make_step_with_actions("s1", vec![make_action("n0", "success", None)]),
+            make_step_with_actions("s2", vec![make_action("n0", "failed", None)]),
         ];
         assert_eq!(aggregate_node_status(&steps, 0), "failed");
     }
@@ -961,14 +935,8 @@ mod tests {
     #[test]
     fn aggregate_status_any_running() {
         let steps = vec![
-            make_step_with_actions(
-                "s1",
-                vec![make_action("n0", "success", None)],
-            ),
-            make_step_with_actions(
-                "s2",
-                vec![make_action("n0", "running", None)],
-            ),
+            make_step_with_actions("s1", vec![make_action("n0", "success", None)]),
+            make_step_with_actions("s2", vec![make_action("n0", "running", None)]),
         ];
         assert_eq!(aggregate_node_status(&steps, 0), "running");
     }
@@ -976,14 +944,8 @@ mod tests {
     #[test]
     fn aggregate_status_timedout() {
         let steps = vec![
-            make_step_with_actions(
-                "s1",
-                vec![make_action("n0", "success", None)],
-            ),
-            make_step_with_actions(
-                "s2",
-                vec![make_action("n0", "timedout", None)],
-            ),
+            make_step_with_actions("s1", vec![make_action("n0", "success", None)]),
+            make_step_with_actions("s2", vec![make_action("n0", "timedout", None)]),
         ];
         assert_eq!(aggregate_node_status(&steps, 0), "failed");
     }
@@ -993,14 +955,8 @@ mod tests {
     #[test]
     fn aggregate_status_failed_takes_priority_over_running() {
         let steps = vec![
-            make_step_with_actions(
-                "s1",
-                vec![make_action("n0", "running", None)],
-            ),
-            make_step_with_actions(
-                "s2",
-                vec![make_action("n0", "failed", None)],
-            ),
+            make_step_with_actions("s1", vec![make_action("n0", "running", None)]),
+            make_step_with_actions("s2", vec![make_action("n0", "failed", None)]),
         ];
         assert_eq!(aggregate_node_status(&steps, 0), "failed");
     }
@@ -1027,14 +983,8 @@ mod tests {
     #[test]
     fn aggregate_status_cancelled_only() {
         let steps = vec![
-            make_step_with_actions(
-                "s1",
-                vec![make_action("n0", "canceled", None)],
-            ),
-            make_step_with_actions(
-                "s2",
-                vec![make_action("n0", "canceled", None)],
-            ),
+            make_step_with_actions("s1", vec![make_action("n0", "canceled", None)]),
+            make_step_with_actions("s2", vec![make_action("n0", "canceled", None)]),
         ];
         // Not all success, not failed, not running → falls to first status
         assert_eq!(aggregate_node_status(&steps, 0), "canceled");
@@ -1044,12 +994,10 @@ mod tests {
     fn aggregate_status_infrastructure_fail() {
         // infrastructure_fail is not caught by aggregate (only "failed"/"timedout")
         // but it's not "success" either, so running check applies if present
-        let steps = vec![
-            make_step_with_actions(
-                "s1",
-                vec![make_action("n0", "infrastructure_fail", None)],
-            ),
-        ];
+        let steps = vec![make_step_with_actions(
+            "s1",
+            vec![make_action("n0", "infrastructure_fail", None)],
+        )];
         // Not failed/timedout, not all success, not running → first status
         assert_eq!(aggregate_node_status(&steps, 0), "infrastructure_fail");
     }
@@ -1068,14 +1016,8 @@ mod tests {
     #[test]
     fn aggregate_duration_sums() {
         let steps = vec![
-            make_step_with_actions(
-                "s1",
-                vec![make_action("n0", "success", Some(5000))],
-            ),
-            make_step_with_actions(
-                "s2",
-                vec![make_action("n0", "success", Some(3000))],
-            ),
+            make_step_with_actions("s1", vec![make_action("n0", "success", Some(5000))]),
+            make_step_with_actions("s2", vec![make_action("n0", "success", Some(3000))]),
         ];
         assert_eq!(aggregate_node_duration(&steps, 0), Some(8000));
     }
@@ -1083,14 +1025,8 @@ mod tests {
     #[test]
     fn aggregate_duration_partial_none() {
         let steps = vec![
-            make_step_with_actions(
-                "s1",
-                vec![make_action("n0", "success", Some(5000))],
-            ),
-            make_step_with_actions(
-                "s2",
-                vec![make_action("n0", "success", None)],
-            ),
+            make_step_with_actions("s1", vec![make_action("n0", "success", Some(5000))]),
+            make_step_with_actions("s2", vec![make_action("n0", "success", None)]),
         ];
         assert_eq!(aggregate_node_duration(&steps, 0), Some(5000));
     }
@@ -1098,14 +1034,8 @@ mod tests {
     #[test]
     fn aggregate_duration_all_none() {
         let steps = vec![
-            make_step_with_actions(
-                "s1",
-                vec![make_action("n0", "success", None)],
-            ),
-            make_step_with_actions(
-                "s2",
-                vec![make_action("n0", "success", None)],
-            ),
+            make_step_with_actions("s1", vec![make_action("n0", "success", None)]),
+            make_step_with_actions("s2", vec![make_action("n0", "success", None)]),
         ];
         assert_eq!(aggregate_node_duration(&steps, 0), None);
     }
@@ -1128,14 +1058,8 @@ mod tests {
     #[test]
     fn aggregate_duration_zero_values() {
         let steps = vec![
-            make_step_with_actions(
-                "s1",
-                vec![make_action("n0", "success", Some(0))],
-            ),
-            make_step_with_actions(
-                "s2",
-                vec![make_action("n0", "success", Some(0))],
-            ),
+            make_step_with_actions("s1", vec![make_action("n0", "success", Some(0))]),
+            make_step_with_actions("s2", vec![make_action("n0", "success", Some(0))]),
         ];
         // Zero is still a valid duration → Some(0)
         assert_eq!(aggregate_node_duration(&steps, 0), Some(0));
