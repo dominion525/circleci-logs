@@ -9,6 +9,7 @@ use std::process::Command;
 struct ConfigFile {
     token: Option<String>,
     project: Option<String>,
+    use_private_api: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -17,6 +18,7 @@ pub struct Config {
     pub vcs_type: String,
     pub org: String,
     pub repo: String,
+    pub use_private_api: bool,
 }
 
 impl std::fmt::Debug for Config {
@@ -34,10 +36,15 @@ impl Config {
     pub fn load() -> Result<Self> {
         let config_file = find_config_file();
         let env_token = env::var("CIRCLE_TOKEN").ok();
-        Self::from_file_and_token(config_file.as_deref(), env_token)
+        let env_private_api = env::var("CIRCLECI_LOGS_PRIVATE_API").ok();
+        Self::from_file_and_env(config_file.as_deref(), env_token, env_private_api)
     }
 
-    fn from_file_and_token(config_path: Option<&Path>, env_token: Option<String>) -> Result<Self> {
+    fn from_file_and_env(
+        config_path: Option<&Path>,
+        env_token: Option<String>,
+        env_private_api: Option<String>,
+    ) -> Result<Self> {
         let parsed = config_path
             .map(|p| {
                 let content = fs::read_to_string(p)
@@ -58,11 +65,21 @@ impl Config {
             )?,
         };
 
+        // env var takes precedence over config file; default is true
+        let use_private_api = match env_private_api {
+            Some(v) => !matches!(v.as_str(), "0" | "false" | "no"),
+            None => parsed
+                .as_ref()
+                .and_then(|c| c.use_private_api)
+                .unwrap_or(true),
+        };
+
         Ok(Config {
             token,
             vcs_type,
             org,
             repo,
+            use_private_api,
         })
     }
 
@@ -271,6 +288,7 @@ mod tests {
             vcs_type: "gh".to_string(),
             org: "myorg".to_string(),
             repo: "myrepo".to_string(),
+            use_private_api: true,
         };
         assert_eq!(config.project_slug(), "gh/myorg/myrepo");
     }
@@ -303,6 +321,7 @@ mod tests {
             vcs_type: "gh".to_string(),
             org: "myorg".to_string(),
             repo: "myrepo".to_string(),
+            use_private_api: true,
         };
         let debug = format!("{:?}", config);
         assert!(!debug.contains("super-secret-token"));
@@ -310,7 +329,7 @@ mod tests {
         assert!(debug.contains("myorg"));
     }
 
-    // --- from_file_and_token tests ---
+    // --- from_file_and_env tests ---
 
     #[test]
     fn load_full_config_from_file() {
@@ -322,7 +341,7 @@ mod tests {
         )
         .unwrap();
 
-        let config = Config::from_file_and_token(Some(&path), None).unwrap();
+        let config = Config::from_file_and_env(Some(&path), None, None).unwrap();
         assert_eq!(config.token, "my-token");
         assert_eq!(config.vcs_type, "gh");
         assert_eq!(config.org, "myorg");
@@ -340,7 +359,7 @@ mod tests {
         .unwrap();
 
         let config =
-            Config::from_file_and_token(Some(&path), Some("env-token".to_string())).unwrap();
+            Config::from_file_and_env(Some(&path), Some("env-token".to_string()), None).unwrap();
         assert_eq!(config.token, "env-token");
     }
 
@@ -350,7 +369,8 @@ mod tests {
         let path = dir.path().join(".circleci-logs.toml");
         fs::write(&path, "project = \"github/org/repo\"\n").unwrap();
 
-        let config = Config::from_file_and_token(Some(&path), Some("env-tok".to_string())).unwrap();
+        let config =
+            Config::from_file_and_env(Some(&path), Some("env-tok".to_string()), None).unwrap();
         assert_eq!(config.token, "env-tok");
     }
 
@@ -361,7 +381,7 @@ mod tests {
         fs::write(&path, "token = \"tok\"\n").unwrap();
 
         // This test runs inside a git repo, so detect_project_from_git_remote should succeed
-        let config = Config::from_file_and_token(Some(&path), None).unwrap();
+        let config = Config::from_file_and_env(Some(&path), None, None).unwrap();
         assert!(!config.org.is_empty());
         assert!(!config.repo.is_empty());
     }
@@ -372,7 +392,7 @@ mod tests {
         let path = dir.path().join(".circleci-logs.toml");
         fs::write(&path, "this is not valid toml [[[").unwrap();
 
-        let err = Config::from_file_and_token(Some(&path), None).unwrap_err();
+        let err = Config::from_file_and_env(Some(&path), None, None).unwrap_err();
         assert!(err.to_string().contains("Failed to parse config file"));
     }
 
@@ -382,14 +402,14 @@ mod tests {
         let path = dir.path().join(".circleci-logs.toml");
         fs::write(&path, "project = \"github/org/repo\"\n").unwrap();
 
-        let err = Config::from_file_and_token(Some(&path), None).unwrap_err();
+        let err = Config::from_file_and_env(Some(&path), None, None).unwrap_err();
         assert!(err.to_string().contains("Token not found"));
     }
 
     #[test]
     fn load_no_config_file_falls_back_to_git_remote() {
         // This test runs inside a git repo, so detect_project_from_git_remote should succeed
-        let config = Config::from_file_and_token(None, Some("tok".to_string())).unwrap();
+        let config = Config::from_file_and_env(None, Some("tok".to_string()), None).unwrap();
         assert!(!config.org.is_empty());
         assert!(!config.repo.is_empty());
     }
@@ -400,8 +420,59 @@ mod tests {
         let path = dir.path().join(".circleci-logs.toml");
         fs::write(&path, "token = \"tok\"\nproject = \"invalid-format\"\n").unwrap();
 
-        let err = Config::from_file_and_token(Some(&path), None).unwrap_err();
+        let err = Config::from_file_and_env(Some(&path), None, None).unwrap_err();
         assert!(err.to_string().contains("vcs_type/org/repo"));
+    }
+
+    // --- use_private_api tests ---
+
+    #[test]
+    fn use_private_api_default_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".circleci-logs.toml");
+        fs::write(&path, "token = \"tok\"\nproject = \"github/org/repo\"\n").unwrap();
+
+        let config = Config::from_file_and_env(Some(&path), None, None).unwrap();
+        assert!(config.use_private_api);
+    }
+
+    #[test]
+    fn use_private_api_file_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".circleci-logs.toml");
+        fs::write(
+            &path,
+            "token = \"tok\"\nproject = \"github/org/repo\"\nuse_private_api = false\n",
+        )
+        .unwrap();
+
+        let config = Config::from_file_and_env(Some(&path), None, None).unwrap();
+        assert!(!config.use_private_api);
+    }
+
+    #[test]
+    fn use_private_api_env_overrides_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".circleci-logs.toml");
+        fs::write(
+            &path,
+            "token = \"tok\"\nproject = \"github/org/repo\"\nuse_private_api = true\n",
+        )
+        .unwrap();
+
+        let config =
+            Config::from_file_and_env(Some(&path), None, Some("false".to_string())).unwrap();
+        assert!(!config.use_private_api);
+    }
+
+    #[test]
+    fn use_private_api_env_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".circleci-logs.toml");
+        fs::write(&path, "token = \"tok\"\nproject = \"github/org/repo\"\n").unwrap();
+
+        let config = Config::from_file_and_env(Some(&path), None, Some("0".to_string())).unwrap();
+        assert!(!config.use_private_api);
     }
 
     // --- host_to_vcs_type tests ---

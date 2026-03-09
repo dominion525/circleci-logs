@@ -1,7 +1,7 @@
 use anyhow::Result;
 use dialoguer::Select;
 
-use crate::api::CircleCiClient;
+use crate::api::{CircleCiClient, LogSource};
 use crate::models::*;
 use crate::output::{colorize_status, format_timestamp};
 
@@ -469,8 +469,9 @@ async fn show_log(
     action: &Action,
     node_index: usize,
 ) -> Result<LogAction> {
-    let log = match action.output_url.as_ref() {
-        Some(url) => match client.fetch_action_output(url).await {
+    let job_number = detail.build_num.unwrap_or(0);
+    let log = match LogSource::from_action(action, job_number) {
+        Some(source) => match client.fetch_log(&source).await {
             Ok(content) => content,
             Err(e) => format!("(failed to fetch log: {})", e),
         },

@@ -12,6 +12,37 @@ fn aggregate_action_outputs(outputs: Vec<ActionOutput>) -> String {
         .join("")
 }
 
+pub enum LogSource {
+    /// Private API + output_url fallback
+    Full {
+        job_number: u64,
+        step_id: u32,
+        task_index: u32,
+        output_url: Option<String>,
+    },
+    /// output_url only (step/index unavailable)
+    OutputUrlOnly { output_url: String },
+}
+
+impl LogSource {
+    pub fn from_action(action: &Action, job_number: u64) -> Option<Self> {
+        match (action.step, action.index) {
+            (Some(step_id), Some(task_index)) => Some(LogSource::Full {
+                job_number,
+                step_id,
+                task_index,
+                output_url: action.output_url.clone(),
+            }),
+            _ => action
+                .output_url
+                .as_ref()
+                .map(|url| LogSource::OutputUrlOnly {
+                    output_url: url.clone(),
+                }),
+        }
+    }
+}
+
 pub struct CircleCiClient {
     client: Client,
     config: Config,
@@ -103,6 +134,69 @@ impl CircleCiClient {
         let outputs: Vec<ActionOutput> =
             resp.json().await.context("Failed to parse action output")?;
         Ok(aggregate_action_outputs(outputs))
+    }
+
+    // --- Private API: raw step output ---
+
+    async fn fetch_private_output(
+        &self,
+        job_number: u64,
+        task_index: u32,
+        step_id: u32,
+    ) -> Result<String> {
+        let url = format!(
+            "{}/api/private/output/raw/{}/{}/output/{}/{}",
+            self.base_url,
+            self.config.project_slug(),
+            job_number,
+            task_index,
+            step_id,
+        );
+        let (header, value) = self.auth_header();
+        let resp = self
+            .client
+            .get(&url)
+            .header(header, value)
+            .send()
+            .await
+            .context("Failed to fetch private output")?;
+
+        match resp.status().as_u16() {
+            204 => Ok(String::new()),
+            _ => {
+                let resp = Self::check_response(resp).await?;
+                resp.text()
+                    .await
+                    .context("Failed to read private output body")
+            }
+        }
+    }
+
+    pub async fn fetch_log(&self, source: &LogSource) -> Result<String> {
+        match source {
+            LogSource::Full {
+                job_number,
+                step_id,
+                task_index,
+                output_url,
+            } => {
+                // Prefer output_url (pre-processed by CircleCI) when available.
+                // Fall back to private API for running jobs where output_url is null.
+                if let Some(url) = output_url {
+                    return self.fetch_action_output(url).await;
+                }
+                if self.config.use_private_api {
+                    if let Ok(text) = self
+                        .fetch_private_output(*job_number, *task_index, *step_id)
+                        .await
+                    {
+                        return Ok(text);
+                    }
+                }
+                Ok(String::new())
+            }
+            LogSource::OutputUrlOnly { output_url } => self.fetch_action_output(output_url).await,
+        }
     }
 
     // --- v2: Job test results ---
@@ -319,6 +413,7 @@ mod tests {
             vcs_type: "gh".into(),
             org: "test-org".into(),
             repo: "test-repo".into(),
+            use_private_api: true,
         }
     }
 
@@ -791,5 +886,153 @@ mod tests {
 
         let err = client.fetch_pipeline_workflows(42).await.unwrap_err();
         assert!(err.to_string().contains("Pipeline number 42 not found"));
+    }
+
+    // --- Private output API tests ---
+
+    #[tokio::test]
+    async fn fetch_private_output_success() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/private/output/raw/gh/test-org/test-repo/42/output/0/106",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string("hello world\n"))
+            .mount(&server)
+            .await;
+
+        let result = client.fetch_private_output(42, 0, 106).await.unwrap();
+        assert_eq!(result, "hello world\n");
+    }
+
+    #[tokio::test]
+    async fn fetch_private_output_empty() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/private/output/raw/gh/test-org/test-repo/42/output/0/106",
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let result = client.fetch_private_output(42, 0, 106).await.unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[tokio::test]
+    async fn fetch_private_output_error() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/private/output/raw/gh/test-org/test-repo/42/output/0/106",
+            ))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let err = client.fetch_private_output(42, 0, 106).await.unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn fetch_log_private_success() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/private/output/raw/gh/test-org/test-repo/42/output/0/106",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string("log output\n"))
+            .mount(&server)
+            .await;
+
+        let source = LogSource::Full {
+            job_number: 42,
+            step_id: 106,
+            task_index: 0,
+            output_url: None,
+        };
+        let result = client.fetch_log(&source).await.unwrap();
+        assert_eq!(result, "log output\n");
+    }
+
+    #[tokio::test]
+    async fn fetch_log_prefers_output_url() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        // output_url should be used directly; private API should not be called
+        let output_url = format!("{}/output-url", server.uri());
+        Mock::given(method("GET"))
+            .and(path("/output-url"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!([{"message": "from output_url\n", "type": "out"}])),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let source = LogSource::Full {
+            job_number: 42,
+            step_id: 106,
+            task_index: 0,
+            output_url: Some(output_url),
+        };
+        let result = client.fetch_log(&source).await.unwrap();
+        assert_eq!(result, "from output_url\n");
+    }
+
+    #[tokio::test]
+    async fn fetch_log_no_fallback() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        // Private API returns 500, no output_url
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/private/output/raw/gh/test-org/test-repo/42/output/0/106",
+            ))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let source = LogSource::Full {
+            job_number: 42,
+            step_id: 106,
+            task_index: 0,
+            output_url: None,
+        };
+        let result = client.fetch_log(&source).await.unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[tokio::test]
+    async fn fetch_log_output_url_only() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/output"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!([{"message": "via url\n", "type": "out"}])),
+            )
+            .mount(&server)
+            .await;
+
+        let source = LogSource::OutputUrlOnly {
+            output_url: format!("{}/output", server.uri()),
+        };
+        let result = client.fetch_log(&source).await.unwrap();
+        assert_eq!(result, "via url\n");
     }
 }

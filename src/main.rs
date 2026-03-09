@@ -273,6 +273,7 @@ pub async fn fetch_step_logs(
     detail: &models::JobDetail,
     errors_only: bool,
 ) -> Vec<(String, String)> {
+    let job_number = detail.build_num.unwrap_or(0);
     let mut targets = Vec::new();
     if let Some(ref steps) = detail.steps {
         for step in steps {
@@ -280,8 +281,8 @@ pub async fn fetch_step_logs(
                 if errors_only && action.status == "success" {
                     continue;
                 }
-                if let Some(ref url) = action.output_url {
-                    targets.push((step.name.clone(), url.clone()));
+                if let Some(source) = api::LogSource::from_action(action, job_number) {
+                    targets.push((step.name.clone(), source));
                 }
             }
         }
@@ -292,15 +293,15 @@ pub async fn fetch_step_logs(
 
 async fn fetch_logs_parallel(
     client: &CircleCiClient,
-    targets: Vec<(String, String)>,
+    targets: Vec<(String, api::LogSource)>,
 ) -> Vec<(String, String)> {
     use futures_util::stream::{self, StreamExt};
 
     let fetches = targets
         .into_iter()
         .enumerate()
-        .map(|(idx, (step_name, url))| async move {
-            let content = match client.fetch_action_output(&url).await {
+        .map(|(idx, (step_name, source))| async move {
+            let content = match client.fetch_log(&source).await {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("Warning: failed to fetch log for '{}': {}", step_name, e);
@@ -431,6 +432,7 @@ mod tests {
             vcs_type: "gh".into(),
             org: "test-org".into(),
             repo: "test-repo".into(),
+            use_private_api: true,
         }
     }
 
