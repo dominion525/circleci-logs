@@ -126,5 +126,5 @@
   - Cargo.toml に `rust-version = "1.87.0"` 追加、CI も更新
 - [x] 中: `format_timestamp` が interactive.rs と output.rs で重複 → 共通化
 - [x] 中: `colorize_status` のステータス定義が interactive.rs と output.rs でずれている → 一元化
-- [ ] 低: main.rs テスト内の `assert_eq!(result, false)` → `assert!(!result)` に統一（8箇所）
-- [ ] 低: `futures` → `futures-util` に絞る（検討）
+- [x] 低: main.rs テスト内の `assert_eq!(result, false)` → `assert!(!result)` に統一（6箇所）
+- [x] 低: `futures` → `futures-util` に絞る
