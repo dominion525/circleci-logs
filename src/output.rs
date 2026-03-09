@@ -73,6 +73,9 @@ fn build_job_log_json(
                             "name": a.name,
                             "status": a.status,
                             "run_time_millis": a.run_time_millis,
+                            "step": a.step,
+                            "index": a.index,
+                            "output_url": a.output_url,
                         })
                     }).collect::<Vec<_>>()
                 })
@@ -515,6 +518,29 @@ mod tests {
         assert_eq!(step["actions"][0]["run_time_millis"], 3000);
         assert_eq!(val["logs"][0]["step"], "build");
         assert_eq!(val["logs"][0]["output"], "output line");
+    }
+
+    #[test]
+    fn build_job_log_json_includes_action_fields() {
+        let action = Action {
+            name: "compile".to_string(),
+            status: "success".to_string(),
+            run_time_millis: Some(1000),
+            step: Some(101),
+            index: Some(0),
+            output_url: Some("https://example.com/output".to_string()),
+        };
+        let detail = make_detail(
+            Some(vec![make_step("build", vec![action])]),
+            Some("success"),
+            Some(42),
+        );
+        let val = build_job_log_json(&detail, &[], false, None);
+
+        let a = &val["steps"][0]["actions"][0];
+        assert_eq!(a["step"], 101);
+        assert_eq!(a["index"], 0);
+        assert_eq!(a["output_url"], "https://example.com/output");
     }
 
     #[test]
