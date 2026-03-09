@@ -160,7 +160,7 @@ dependencies = [
  "clap",
  "colored",
  "dialoguer",
- "futures",
+ "futures-util",
  "regex",
  "reqwest",
  "serde",

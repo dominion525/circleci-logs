@@ -1166,7 +1166,8 @@ mod tests {
     #[test]
     fn format_step_item_for_node_out_of_range_no_panic() {
         colored::control::set_override(false);
-        let step = make_step_with_actions("Build", vec![make_action("node 0", "success", Some(1000))]);
+        let step =
+            make_step_with_actions("Build", vec![make_action("node 0", "success", Some(1000))]);
         let result = format_step_item_for_node(&step, 5);
         assert!(result.contains("Build"));
         assert!(result.contains("-"));

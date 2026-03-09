@@ -426,7 +426,10 @@ mod tests {
         assert_eq!(colorize_status("failed"), "failed");
         assert_eq!(colorize_status("failure"), "failure");
         assert_eq!(colorize_status("timedout"), "timedout");
-        assert_eq!(colorize_status("infrastructure_fail"), "infrastructure_fail");
+        assert_eq!(
+            colorize_status("infrastructure_fail"),
+            "infrastructure_fail"
+        );
         assert_eq!(colorize_status("error"), "error");
         assert_eq!(colorize_status("running"), "running");
         assert_eq!(colorize_status("canceled"), "canceled");
