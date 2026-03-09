@@ -288,10 +288,7 @@ impl CircleCiClient {
         pipeline_id: &str,
         page_token: Option<&str>,
     ) -> Result<PipelineWorkflowsResponse> {
-        let mut url = format!(
-            "{}/api/v2/pipeline/{}/workflow",
-            self.base_url, pipeline_id
-        );
+        let mut url = format!("{}/api/v2/pipeline/{}/workflow", self.base_url, pipeline_id);
         if let Some(token) = page_token {
             url.push_str(&format!("?page-token={}", token));
         }
@@ -741,7 +738,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let resp = client.fetch_workflow_jobs_page("wf-abc", None).await.unwrap();
+        let resp = client
+            .fetch_workflow_jobs_page("wf-abc", None)
+            .await
+            .unwrap();
         assert_eq!(resp.items.len(), 1);
         assert_eq!(resp.items[0].name, "build");
         assert!(resp.next_page_token.is_none());

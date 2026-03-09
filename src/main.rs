@@ -103,7 +103,9 @@ async fn main() -> Result<()> {
             || cli.tests
             || cli.failed_only)
     {
-        anyhow::bail!("-i/--interactive cannot be used with --json, --errors-only, --grep, --tests, --failed-only, or --fail-on-error");
+        anyhow::bail!(
+            "-i/--interactive cannot be used with --json, --errors-only, --grep, --tests, --failed-only, or --fail-on-error"
+        );
     }
 
     // TTY check for interactive mode
@@ -126,12 +128,21 @@ async fn main() -> Result<()> {
             Some((parsed.vcs_type, parsed.org, parsed.repo)),
         )
     } else {
-        (cli.job_number, cli.workflow_id.clone(), cli.pipeline_number, None)
+        (
+            cli.job_number,
+            cli.workflow_id.clone(),
+            cli.pipeline_number,
+            None,
+        )
     };
 
     // Validate -j dependent options
     if job_number.is_none()
-        && (cli.errors_only || cli.grep.is_some() || cli.fail_on_error || cli.tests || cli.failed_only)
+        && (cli.errors_only
+            || cli.grep.is_some()
+            || cli.fail_on_error
+            || cli.tests
+            || cli.failed_only)
     {
         let flag = if cli.errors_only {
             "--errors-only"
@@ -144,7 +155,10 @@ async fn main() -> Result<()> {
         } else {
             "--failed-only"
         };
-        anyhow::bail!("{} can only be used with -j/--jid (or a URL ending in /jobs/N)", flag);
+        anyhow::bail!(
+            "{} can only be used with -j/--jid (or a URL ending in /jobs/N)",
+            flag
+        );
     }
 
     if cli.failed_only && !cli.tests {
@@ -180,10 +194,8 @@ async fn main() -> Result<()> {
     if cli.interactive {
         let start = if let Some(ref url) = cli.url {
             let parsed = parse_circleci_url(url)?;
-            if parsed.workflow_id.is_some() {
-                interactive::InteractiveStart::Jobs {
-                    workflow_id: parsed.workflow_id.unwrap(),
-                }
+            if let Some(workflow_id) = parsed.workflow_id {
+                interactive::InteractiveStart::Jobs { workflow_id }
             } else if let Some(pn) = parsed.pipeline_number {
                 interactive::InteractiveStart::Workflows {
                     pipeline_number: pn,
@@ -251,8 +263,7 @@ async fn run_job_log(
 
     output::print_job_log(&detail, &logs, errors_only, grep_re.as_ref(), json)?;
 
-    let has_error = fail_on_error
-        && detail.status.as_deref().is_some_and(|s| s != "success");
+    let has_error = fail_on_error && detail.status.as_deref().is_some_and(|s| s != "success");
     Ok(has_error)
 }
 
@@ -328,9 +339,9 @@ async fn run_job_tests(
     output::print_test_results(&tests, job_number, failed_only, json)?;
 
     let has_error = fail_on_error
-        && tests.iter().any(|t| {
-            matches!(t.result.as_deref(), Some("failure") | Some("failed"))
-        });
+        && tests
+            .iter()
+            .any(|t| matches!(t.result.as_deref(), Some("failure") | Some("failed")));
     Ok(has_error)
 }
 
@@ -355,7 +366,9 @@ fn parse_circleci_url(url: &str) -> Result<ParsedUrl> {
 
     // Expected: pipelines/{vcs}/{org}/{repo}/{pipeline_number}[/workflows/{wf_id}[/jobs/{job_number}]]
     if segments.len() < 5 || segments[0] != "pipelines" {
-        anyhow::bail!("Invalid CircleCI URL format: expected /pipelines/{{vcs}}/{{org}}/{{repo}}/{{number}}/...");
+        anyhow::bail!(
+            "Invalid CircleCI URL format: expected /pipelines/{{vcs}}/{{org}}/{{repo}}/{{number}}/..."
+        );
     }
 
     let vcs_type = config::normalize_vcs_type(segments[1])?;
@@ -818,17 +831,15 @@ mod tests {
 
     #[test]
     fn parse_url_invalid_too_short() {
-        let err =
-            parse_circleci_url("https://app.circleci.com/pipelines/github/org").unwrap_err();
+        let err = parse_circleci_url("https://app.circleci.com/pipelines/github/org").unwrap_err();
         assert!(err.to_string().contains("Invalid CircleCI URL format"));
     }
 
     #[test]
     fn parse_url_invalid_pipeline_number() {
-        let err = parse_circleci_url(
-            "https://app.circleci.com/pipelines/github/org/repo/notanumber",
-        )
-        .unwrap_err();
+        let err =
+            parse_circleci_url("https://app.circleci.com/pipelines/github/org/repo/notanumber")
+                .unwrap_err();
         assert!(err.to_string().contains("Invalid pipeline number"));
     }
 
