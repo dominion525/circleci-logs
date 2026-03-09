@@ -18,7 +18,10 @@ fn colorize_status(status: &str) -> String {
 
 fn format_timestamp(ts: &str) -> String {
     match DateTime::parse_from_rfc3339(ts) {
-        Ok(dt) => dt.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string(),
+        Ok(dt) => dt
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string(),
         Err(_) => ts.to_string(),
     }
 }
@@ -194,8 +197,16 @@ pub fn print_workflow_jobs(jobs: &[WorkflowJob], json: bool) -> Result<()> {
             .job_number
             .map(|n| n.to_string())
             .unwrap_or_else(|| "-".to_string());
-        let started = job.started_at.as_deref().map(format_timestamp).unwrap_or_else(|| "-".to_string());
-        let stopped = job.stopped_at.as_deref().map(format_timestamp).unwrap_or_else(|| "-".to_string());
+        let started = job
+            .started_at
+            .as_deref()
+            .map(format_timestamp)
+            .unwrap_or_else(|| "-".to_string());
+        let stopped = job
+            .stopped_at
+            .as_deref()
+            .map(format_timestamp)
+            .unwrap_or_else(|| "-".to_string());
         println!(
             "{:<8} {:<30} {:<12} {:<20} {:<20}",
             job_num,
@@ -233,9 +244,7 @@ pub fn print_test_results(
         let output: Vec<&TestResult> = if failed_only {
             tests
                 .iter()
-                .filter(|t| {
-                    matches!(t.result.as_deref(), Some("failure") | Some("failed"))
-                })
+                .filter(|t| matches!(t.result.as_deref(), Some("failure") | Some("failed")))
                 .collect()
         } else {
             tests.iter().collect()
@@ -255,10 +264,7 @@ pub fn print_test_results(
 
     println!("Test Results: Job #{}\n", job_number);
 
-    println!(
-        "{:<10} {:<10} {:<30} {}",
-        "RESULT", "TIME", "FILE", "NAME"
-    );
+    println!("{:<10} {:<10} {:<30} NAME", "RESULT", "TIME", "FILE");
     println!("{}", "-".repeat(90));
 
     for t in &filtered {
@@ -344,8 +350,16 @@ pub fn print_pipeline_workflows(workflows: &[PipelineWorkflow], json: bool) -> R
     );
     println!("{}", "-".repeat(115));
     for wf in workflows {
-        let created = wf.created_at.as_deref().map(format_timestamp).unwrap_or_else(|| "-".to_string());
-        let stopped = wf.stopped_at.as_deref().map(format_timestamp).unwrap_or_else(|| "-".to_string());
+        let created = wf
+            .created_at
+            .as_deref()
+            .map(format_timestamp)
+            .unwrap_or_else(|| "-".to_string());
+        let stopped = wf
+            .stopped_at
+            .as_deref()
+            .map(format_timestamp)
+            .unwrap_or_else(|| "-".to_string());
         println!(
             "{:<38} {:<25} {:<12} {:<20} {:<20}",
             wf.id,
@@ -637,16 +651,28 @@ mod tests {
     fn print_test_results_text_smoke() {
         let tests = vec![
             make_test_result("test1", "success", Some(0.5), None, Some("a.rb"), None),
-            make_test_result("test2", "failure", Some(0.1), Some("Expected true"), Some("b.rb"), Some("AuthSpec")),
+            make_test_result(
+                "test2",
+                "failure",
+                Some(0.1),
+                Some("Expected true"),
+                Some("b.rb"),
+                Some("AuthSpec"),
+            ),
         ];
         assert!(print_test_results(&tests, 42, false, false).is_ok());
     }
 
     #[test]
     fn print_test_results_json_smoke() {
-        let tests = vec![
-            make_test_result("test1", "success", Some(0.5), None, None, None),
-        ];
+        let tests = vec![make_test_result(
+            "test1",
+            "success",
+            Some(0.5),
+            None,
+            None,
+            None,
+        )];
         assert!(print_test_results(&tests, 42, false, true).is_ok());
     }
 
