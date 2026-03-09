@@ -292,7 +292,7 @@ async fn select_job(
             };
 
             // Parallel job: any step has >1 actions
-            if steps[0].actions.len() > 1 {
+            if steps.first().is_some_and(|s| s.actions.len() > 1) {
                 return Ok(State::Nodes {
                     job_number,
                     detail,
@@ -336,7 +336,14 @@ async fn select_node(
         }
     };
 
-    let parallelism = steps[0].actions.len();
+    let parallelism = steps.first().map(|s| s.actions.len()).unwrap_or(0);
+    if parallelism == 0 {
+        return Ok(State::Jobs {
+            workflow_id: workflow_id.to_string(),
+            pipeline_number,
+            pipeline_id: pipeline_id.to_string(),
+        });
+    }
     let back_label = ".. (back to jobs)";
 
     let mut labels: Vec<String> = vec![back_label.to_string()];
@@ -445,7 +452,9 @@ async fn select_step(
         let step_index = selection - 1;
         let step = &steps[step_index];
         let action_index = node_index.unwrap_or(0);
-        let action = &step.actions[action_index];
+        let Some(action) = step.actions.get(action_index) else {
+            continue;
+        };
 
         match show_log(client, &detail, step, action, action_index).await? {
             LogAction::Back => continue,
@@ -533,7 +542,9 @@ fn format_node_item(steps: &[Step], node_index: usize) -> String {
 }
 
 fn format_step_item_for_node(step: &Step, node_index: usize) -> String {
-    let action = &step.actions[node_index];
+    let Some(action) = step.actions.get(node_index) else {
+        return format!("[{:<7}] {:<40} -", "-", step.name);
+    };
     let duration = crate::output::format_duration(action.run_time_millis);
     format!(
         "[{}] {:<40} {}",
@@ -544,7 +555,9 @@ fn format_step_item_for_node(step: &Step, node_index: usize) -> String {
 }
 
 fn format_step_item(step: &Step) -> String {
-    let action = &step.actions[0];
+    let Some(action) = step.actions.first() else {
+        return format!("[{:<7}] {:<40} -", "-", step.name);
+    };
     let duration = crate::output::format_duration(action.run_time_millis);
     format!(
         "[{}] {:<40} {}",
@@ -1157,6 +1170,35 @@ mod tests {
         assert!(result.contains("node 15"));
         assert!(result.contains("failed"));
         assert!(result.contains("2s"));
+    }
+
+    // --- Safety tests: empty actions / out-of-range index ---
+
+    #[test]
+    fn format_step_item_empty_actions_no_panic() {
+        colored::control::set_override(false);
+        let step = make_step_with_actions("Empty", vec![]);
+        let result = format_step_item(&step);
+        assert!(result.contains("Empty"));
+        assert!(result.contains("-"));
+    }
+
+    #[test]
+    fn format_step_item_for_node_out_of_range_no_panic() {
+        colored::control::set_override(false);
+        let step = make_step_with_actions("Build", vec![make_action("node 0", "success", Some(1000))]);
+        let result = format_step_item_for_node(&step, 5);
+        assert!(result.contains("Build"));
+        assert!(result.contains("-"));
+    }
+
+    #[test]
+    fn format_node_item_empty_actions_no_panic() {
+        colored::control::set_override(false);
+        let steps = vec![make_step_with_actions("Empty", vec![])];
+        let result = format_node_item(&steps, 0);
+        // Should produce output without panicking (aggregates already use .get())
+        assert!(result.contains("node 0"));
     }
 
     #[test]
