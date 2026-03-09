@@ -74,7 +74,7 @@
   - JSON 出力は API 生データのまま維持
   - ISO 8601 ベースの固定フォーマット (`YYYY-MM-DD HH:MM:SS`) を採用
 
-- [ ] 対話型 TUI ドリルダウンモード (`-i` / `--interactive`)
+- [x] 対話型 TUI ドリルダウンモード (`-i` / `--interactive`)
   - パイプライン → ワークフロー → ジョブ → ログと階層的に選択・表示
   - ライブラリ: `dialoguer`（Select / FuzzySelect）
   - 実装ステップ:
@@ -111,7 +111,20 @@
   - `-j` 専用。ジョブステータスが success 以外なら終了コード 1
   - `run_job_log` は `Result<bool>` を返し、`process::exit(1)` は main 側で実行（テスタブル）
 
-- [ ] Claude Code Skills の整備
+- [x] Claude Code Skills の整備
   - MCP サーバーは不要（CLI を Bash 経由で直接呼べば十分）
   - Skills で CLI の使い方・典型的なワークフローを記述
   - トークン消費を抑えつつ AI アシスタントとの連携を実現
+
+## v0.2.1 パッチリリース候補
+
+- [x] `--version` / `-V` フラグ追加
+- [x] SKILL.md/SKILL.ja.md の `--json` ガイダンス緩和
+- [x] 高: 配列アクセス安全性（interactive.rs）— 5箇所
+  - steps[0].actions の空チェック、.get() への変更等
+- [x] 中: MSRV 明示
+  - Cargo.toml に `rust-version = "1.87.0"` 追加、CI も更新
+- [x] 中: `format_timestamp` が interactive.rs と output.rs で重複 → 共通化
+- [x] 中: `colorize_status` のステータス定義が interactive.rs と output.rs でずれている → 一元化
+- [ ] 低: main.rs テスト内の `assert_eq!(result, false)` → `assert!(!result)` に統一（8箇所）
+- [ ] 低: `futures` → `futures-util` に絞る（検討）
