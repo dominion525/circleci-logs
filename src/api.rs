@@ -13,7 +13,7 @@ fn aggregate_action_outputs(outputs: Vec<ActionOutput>) -> String {
 }
 
 pub enum LogSource {
-    /// Private API + output_url fallback
+    /// output_url preferred; private API used when output_url is absent (running jobs)
     Full {
         job_number: u64,
         step_id: u32,
@@ -992,7 +992,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_log_no_fallback() {
+    async fn fetch_log_private_api_fails_no_output_url() {
         let server = MockServer::start().await;
         let client = CircleCiClient::with_base_url(test_config(), server.uri());
 
