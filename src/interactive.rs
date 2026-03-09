@@ -1,10 +1,9 @@
 use anyhow::Result;
-use chrono::{DateTime, Local};
-use colored::Colorize;
 use dialoguer::Select;
 
 use crate::api::CircleCiClient;
 use crate::models::*;
+use crate::output::{colorize_status, format_timestamp};
 
 pub enum InteractiveStart {
     Pipelines,
@@ -570,26 +569,7 @@ fn format_step_item(step: &Step) -> String {
 /// Pad status to `width` visible characters, then colorize.
 fn colorize_status_padded(status: &str, width: usize) -> String {
     let padded = format!("{:<width$}", status, width = width);
-    match status {
-        "success" | "created" => padded.green().to_string(),
-        "failed" | "failure" | "timedout" | "infrastructure_fail" | "error" => {
-            padded.red().to_string()
-        }
-        "running" => padded.yellow().to_string(),
-        "canceled" | "cancelled" => padded.dimmed().to_string(),
-        "not_run" | "skipped" => padded.dimmed().to_string(),
-        _ => padded,
-    }
-}
-
-fn format_timestamp(ts: &str) -> String {
-    match DateTime::parse_from_rfc3339(ts) {
-        Ok(dt) => dt
-            .with_timezone(&Local)
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string(),
-        Err(_) => ts.to_string(),
-    }
+    colorize_status(&padded)
 }
 
 fn format_pipeline_item(p: &Pipeline) -> String {
