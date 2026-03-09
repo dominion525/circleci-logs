@@ -139,7 +139,10 @@ fn host_to_vcs_type(host: &str) -> Result<String> {
     match host {
         "github.com" => Ok("gh".to_string()),
         "bitbucket.org" => Ok("bb".to_string()),
-        _ => bail!("Unsupported git host '{}'. Only github.com and bitbucket.org are supported", host),
+        _ => bail!(
+            "Unsupported git host '{}'. Only github.com and bitbucket.org are supported",
+            host
+        ),
     }
 }
 
@@ -152,19 +155,23 @@ fn parse_git_remote_url(url: &str) -> Result<(String, String, String)> {
     let (host, path) = if url.starts_with("ssh://") {
         // ssh://git@github.com/org/repo.git
         let rest = url.strip_prefix("ssh://").unwrap();
-        let rest = rest.split('@').last().unwrap_or(rest);
-        let slash_pos = rest.find('/').context("Invalid SSH URL: no path separator")?;
+        let rest = rest.split('@').next_back().unwrap_or(rest);
+        let slash_pos = rest
+            .find('/')
+            .context("Invalid SSH URL: no path separator")?;
         (&rest[..slash_pos], &rest[slash_pos + 1..])
     } else if url.starts_with("https://") || url.starts_with("http://") {
         // https://github.com/org/repo.git or https://user@github.com/org/repo.git
         let rest = url.split("://").nth(1).unwrap();
-        let rest = rest.split('@').last().unwrap_or(rest);
-        let slash_pos = rest.find('/').context("Invalid HTTPS URL: no path separator")?;
+        let rest = rest.split('@').next_back().unwrap_or(rest);
+        let slash_pos = rest
+            .find('/')
+            .context("Invalid HTTPS URL: no path separator")?;
         (&rest[..slash_pos], &rest[slash_pos + 1..])
     } else if url.contains(':') && !url.contains("://") {
         // git@github.com:org/repo.git (SCP-like syntax)
         let at_host = url.split(':').next().unwrap();
-        let host = at_host.split('@').last().unwrap_or(at_host);
+        let host = at_host.split('@').next_back().unwrap_or(at_host);
         let path = url.split(':').nth(1).unwrap();
         (host, path)
     } else {
@@ -178,10 +185,7 @@ fn parse_git_remote_url(url: &str) -> Result<(String, String, String)> {
 
     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     if parts.len() != 2 {
-        bail!(
-            "Expected 'org/repo' path in git remote URL, got '{}'",
-            path
-        );
+        bail!("Expected 'org/repo' path in git remote URL, got '{}'", path);
     }
 
     Ok((vcs_type, parts[0].to_string(), parts[1].to_string()))
@@ -422,8 +426,7 @@ mod tests {
 
     #[test]
     fn parse_https_with_dot_git() {
-        let (vcs, org, repo) =
-            parse_git_remote_url("https://github.com/myorg/myrepo.git").unwrap();
+        let (vcs, org, repo) = parse_git_remote_url("https://github.com/myorg/myrepo.git").unwrap();
         assert_eq!(vcs, "gh");
         assert_eq!(org, "myorg");
         assert_eq!(repo, "myrepo");
@@ -431,8 +434,7 @@ mod tests {
 
     #[test]
     fn parse_https_without_dot_git() {
-        let (vcs, org, repo) =
-            parse_git_remote_url("https://github.com/myorg/myrepo").unwrap();
+        let (vcs, org, repo) = parse_git_remote_url("https://github.com/myorg/myrepo").unwrap();
         assert_eq!(vcs, "gh");
         assert_eq!(org, "myorg");
         assert_eq!(repo, "myrepo");
@@ -440,8 +442,7 @@ mod tests {
 
     #[test]
     fn parse_ssh_scp_format() {
-        let (vcs, org, repo) =
-            parse_git_remote_url("git@github.com:myorg/myrepo.git").unwrap();
+        let (vcs, org, repo) = parse_git_remote_url("git@github.com:myorg/myrepo.git").unwrap();
         assert_eq!(vcs, "gh");
         assert_eq!(org, "myorg");
         assert_eq!(repo, "myrepo");
@@ -467,8 +468,7 @@ mod tests {
 
     #[test]
     fn parse_bitbucket_ssh() {
-        let (vcs, org, repo) =
-            parse_git_remote_url("git@bitbucket.org:myorg/myrepo.git").unwrap();
+        let (vcs, org, repo) = parse_git_remote_url("git@bitbucket.org:myorg/myrepo.git").unwrap();
         assert_eq!(vcs, "bb");
         assert_eq!(org, "myorg");
         assert_eq!(repo, "myrepo");
@@ -503,7 +503,10 @@ mod tests {
     #[test]
     fn parse_unrecognized_format() {
         let err = parse_git_remote_url("/local/path/to/repo").unwrap_err();
-        assert!(err.to_string().contains("Unrecognized git remote URL format"));
+        assert!(
+            err.to_string()
+                .contains("Unrecognized git remote URL format")
+        );
     }
 
     #[test]
@@ -517,8 +520,7 @@ mod tests {
 
     #[test]
     fn parse_http_url() {
-        let (vcs, org, repo) =
-            parse_git_remote_url("http://github.com/myorg/myrepo.git").unwrap();
+        let (vcs, org, repo) = parse_git_remote_url("http://github.com/myorg/myrepo.git").unwrap();
         assert_eq!(vcs, "gh");
         assert_eq!(org, "myorg");
         assert_eq!(repo, "myrepo");
