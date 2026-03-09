@@ -1,5 +1,7 @@
 # circleci-logs
 
+**[English](README.md)**
+
 CircleCI のジョブログ・ワークフロー情報・パイプライン情報をコマンドラインから取得するツール。
 
 ## クイックスタート
