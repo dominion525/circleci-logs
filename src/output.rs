@@ -46,16 +46,29 @@ fn filter_log_lines(content: &str, grep: Option<&Regex>) -> String {
 /// When `preserve_colors` is true, retains ANSI color codes (for terminal output).
 /// When false, returns plain text (for file/pipe/JSON).
 pub fn render_log(content: &str, preserve_colors: bool) -> String {
-    // Fast path: no escape sequences
-    if !content.as_bytes().contains(&0x1b) {
+    // Fast path: no escape sequences, no NUL bytes, and no literal ^@ (caret notation)
+    if !content.as_bytes().contains(&0x1b)
+        && !content.as_bytes().contains(&0)
+        && !content.contains("^@")
+    {
         return content.to_string();
     }
+    // Filter NUL bytes (0x00) and literal "^@" (caret notation for NUL that
+    // appears in some CI log data) before processing.
+    let without_caret_at = content.replace("^@", "");
+    let clean: Vec<u8> = without_caret_at.bytes().filter(|&b| b != 0).collect();
+    // If no escape sequences remain, return as-is
+    if !clean.contains(&0x1b) {
+        return String::from_utf8_lossy(&clean).to_string();
+    }
     let mut parser = vt100::Parser::new(u16::MAX, 200, 0);
-    parser.process(content.as_bytes());
+    parser.process(&clean);
     if preserve_colors {
-        String::from_utf8_lossy(&parser.screen().contents_formatted()).to_string()
+        let formatted = parser.screen().contents_formatted();
+        let filtered: Vec<u8> = formatted.into_iter().filter(|&b| b != 0).collect();
+        String::from_utf8_lossy(&filtered).to_string()
     } else {
-        parser.screen().contents()
+        parser.screen().contents().replace('\0', "")
     }
 }
 
@@ -564,6 +577,34 @@ mod tests {
         assert!(result.contains("progress: 100%"));
         assert!(!result.contains("progress: 50%"));
         assert!(result.contains("done"));
+    }
+
+    #[test]
+    fn render_log_filters_nul_bytes() {
+        let input = "hello\x00world";
+        let result = render_log(input, false);
+        assert_eq!(result, "helloworld");
+        assert!(!result.contains('\0'));
+    }
+
+    #[test]
+    fn render_log_filters_nul_with_ansi() {
+        let input = "\x1b[34mblue\x00text\x1b[0m";
+        let result = render_log(input, false);
+        assert_eq!(result, "bluetext");
+        assert!(!result.contains('\0'));
+    }
+
+    #[test]
+    fn render_log_docker_compose_no_caret_at() {
+        // Docker compose output with ✔, cursor-up, erase-line
+        let input = " \u{2714} Container test  Running0.0s \n\x1b[1A\x1b[2K \u{2714} Container test  Running0.0s \nBundle complete!";
+        let result_plain = render_log(input, false);
+        let result_color = render_log(input, true);
+        // Should not contain literal ^@ from NUL cells
+        assert!(!result_plain.contains("^@"), "plain contains ^@: {:?}", result_plain);
+        assert!(!result_color.contains("^@"), "color contains ^@: {:?}", result_color);
+        assert!(result_plain.contains("Bundle complete!"));
     }
 
     // --- build_job_log_json tests ---
