@@ -12,6 +12,48 @@ fn aggregate_action_outputs(outputs: Vec<ActionOutput>) -> String {
         .join("")
 }
 
+/// A chunk of log data returned by an incremental (Range-based) fetch.
+///
+/// Used by [`CircleCiClient::fetch_private_output_range`] to stream running-job
+/// output. The caller tracks `new_offset` and passes it back on the next request
+/// so only bytes not yet seen are returned.
+pub struct StreamChunk {
+    /// Raw log bytes received in this fetch (may be empty when no new output).
+    pub data: Vec<u8>,
+    /// The byte offset to use for the *next* fetch.
+    /// - On HTTP 200 with offset 0: total length of the response body.
+    /// - On HTTP 200 with offset > 0: total length if body exceeds offset
+    ///   (already-seen bytes are stripped from `data`); otherwise unchanged.
+    /// - On HTTP 206 (partial content): `previous_offset + body_length`.
+    /// - On HTTP 204/416 (no new data): unchanged from the request offset.
+    pub new_offset: u64,
+}
+
+/// Build a [`StreamChunk`] from a full-body (non-partial) response, stripping
+/// bytes the caller has already seen when `byte_offset > 0`.
+fn chunk_from_full_body(data: Vec<u8>, byte_offset: u64) -> StreamChunk {
+    let total_len = data.len() as u64;
+    if byte_offset > 0 && total_len > byte_offset {
+        // Server ignored Range header; strip already-seen prefix
+        StreamChunk {
+            data: data[byte_offset as usize..].to_vec(),
+            new_offset: total_len,
+        }
+    } else if byte_offset > 0 {
+        // Stale/shorter response — no new data; prevent offset regression
+        StreamChunk {
+            data: Vec::new(),
+            new_offset: byte_offset,
+        }
+    } else {
+        // Initial fetch (byte_offset == 0)
+        StreamChunk {
+            data,
+            new_offset: total_len,
+        }
+    }
+}
+
 pub enum LogSource {
     /// output_url preferred; private API used when output_url is absent (running jobs)
     Full {
@@ -196,6 +238,97 @@ impl CircleCiClient {
                 Ok(String::new())
             }
             LogSource::OutputUrlOnly { output_url } => self.fetch_action_output(output_url).await,
+        }
+    }
+
+    // --- Private API: incremental range fetch for streaming ---
+
+    /// Fetch a range of raw log bytes from the CircleCI private output API.
+    ///
+    /// Sends `Range: bytes={byte_offset}-` when `byte_offset > 0` to request only
+    /// the bytes beyond what was already received.  The response status determines
+    /// how [`StreamChunk::new_offset`] is calculated:
+    ///
+    /// - **200** – Server ignored the Range header (or first fetch with offset 0).
+    ///   `new_offset` = body length.
+    /// - **206** – Partial content returned.  `new_offset` = `byte_offset` + body length.
+    /// - **204 / 416** – No new data available.  `new_offset` unchanged.
+    ///
+    /// On HTTP 429 (rate limited) the request is retried up to 3 times, honoring
+    /// the `Retry-After` header (defaults to 1 second if missing).
+    pub async fn fetch_private_output_range(
+        &self,
+        job_number: u64,
+        task_index: u32,
+        step_id: u32,
+        byte_offset: u64,
+    ) -> Result<StreamChunk> {
+        let url = format!(
+            "{}/api/private/output/raw/{}/{}/output/{}/{}",
+            self.base_url,
+            self.config.project_slug(),
+            job_number,
+            task_index,
+            step_id,
+        );
+        let (header, value) = self.auth_header();
+        let mut retries = 0u32;
+        let resp = loop {
+            let mut req = self.client.get(&url).header(header, value);
+            if byte_offset > 0 {
+                req = req.header("Range", format!("bytes={}-", byte_offset));
+            }
+            let resp = req
+                .send()
+                .await
+                .context("Failed to fetch private output range")?;
+            let status = resp.status().as_u16();
+            if status == 429 && retries < 3 {
+                let wait_secs = resp
+                    .headers()
+                    .get("Retry-After")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(1);
+                tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+                retries += 1;
+                continue;
+            }
+            break resp;
+        };
+
+        let status = resp.status().as_u16();
+        match status {
+            204 | 416 => Ok(StreamChunk {
+                data: Vec::new(),
+                new_offset: byte_offset,
+            }),
+            200 => {
+                let data = resp
+                    .bytes()
+                    .await
+                    .context("Failed to read range body")?
+                    .to_vec();
+                Ok(chunk_from_full_body(data, byte_offset))
+            }
+            206 => {
+                let data = resp
+                    .bytes()
+                    .await
+                    .context("Failed to read range body")?
+                    .to_vec();
+                let new_offset = byte_offset + data.len() as u64;
+                Ok(StreamChunk { data, new_offset })
+            }
+            _ => {
+                let resp = Self::check_response(resp).await?;
+                let data = resp
+                    .bytes()
+                    .await
+                    .context("Failed to read range body")?
+                    .to_vec();
+                Ok(chunk_from_full_body(data, byte_offset))
+            }
         }
     }
 
@@ -1033,5 +1166,254 @@ mod tests {
         };
         let result = client.fetch_log(&source).await.unwrap();
         assert_eq!(result, "via url\n");
+    }
+
+    // --- fetch_private_output_range tests ---
+
+    #[tokio::test]
+    async fn fetch_range_200_full_body() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/private/output/raw/gh/test-org/test-repo/42/output/0/106",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string("hello world\n"))
+            .mount(&server)
+            .await;
+
+        let chunk = client
+            .fetch_private_output_range(42, 0, 106, 0)
+            .await
+            .unwrap();
+        assert_eq!(chunk.data, b"hello world\n");
+        assert_eq!(chunk.new_offset, 12); // "hello world\n".len()
+    }
+
+    #[tokio::test]
+    async fn fetch_range_206_partial_content() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/private/output/raw/gh/test-org/test-repo/42/output/0/106",
+            ))
+            .and(header("Range", "bytes=100-"))
+            .respond_with(ResponseTemplate::new(206).set_body_string("new data"))
+            .mount(&server)
+            .await;
+
+        let chunk = client
+            .fetch_private_output_range(42, 0, 106, 100)
+            .await
+            .unwrap();
+        assert_eq!(chunk.data, b"new data");
+        assert_eq!(chunk.new_offset, 108); // 100 + 8
+    }
+
+    #[tokio::test]
+    async fn fetch_range_204_no_content() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/private/output/raw/gh/test-org/test-repo/42/output/0/106",
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let chunk = client
+            .fetch_private_output_range(42, 0, 106, 0)
+            .await
+            .unwrap();
+        assert!(chunk.data.is_empty());
+        assert_eq!(chunk.new_offset, 0);
+    }
+
+    #[tokio::test]
+    async fn fetch_range_416_range_not_satisfiable() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/private/output/raw/gh/test-org/test-repo/42/output/0/106",
+            ))
+            .and(header("Range", "bytes=999-"))
+            .respond_with(ResponseTemplate::new(416))
+            .mount(&server)
+            .await;
+
+        let chunk = client
+            .fetch_private_output_range(42, 0, 106, 999)
+            .await
+            .unwrap();
+        assert!(chunk.data.is_empty());
+        assert_eq!(chunk.new_offset, 999);
+    }
+
+    #[tokio::test]
+    async fn fetch_range_no_range_header_at_offset_zero() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        // This mock requires NO Range header — it only matches requests without one
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/private/output/raw/gh/test-org/test-repo/42/output/0/106",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string("initial"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let chunk = client
+            .fetch_private_output_range(42, 0, 106, 0)
+            .await
+            .unwrap();
+        assert_eq!(chunk.data, b"initial");
+        assert_eq!(chunk.new_offset, 7);
+    }
+
+    #[tokio::test]
+    async fn fetch_range_429_retries_then_succeeds() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        // 200 response (lower priority)
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/private/output/raw/gh/test-org/test-repo/42/output/0/106",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string("after retry"))
+            .mount(&server)
+            .await;
+
+        // 429 response (higher priority, consumed once)
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/private/output/raw/gh/test-org/test-repo/42/output/0/106",
+            ))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        let chunk = client
+            .fetch_private_output_range(42, 0, 106, 0)
+            .await
+            .unwrap();
+        assert_eq!(chunk.data, b"after retry");
+    }
+
+    // --- chunk_from_full_body unit tests ---
+
+    #[test]
+    fn chunk_from_full_body_strips_prefix() {
+        let data = b"AAAAABBBBB".to_vec(); // 10 bytes
+        let chunk = super::chunk_from_full_body(data, 5);
+        assert_eq!(chunk.data, b"BBBBB");
+        assert_eq!(chunk.new_offset, 10);
+    }
+
+    #[test]
+    fn chunk_from_full_body_no_regression() {
+        let data = vec![b'X'; 3];
+        let chunk = super::chunk_from_full_body(data, 5);
+        assert!(chunk.data.is_empty());
+        assert_eq!(chunk.new_offset, 5);
+    }
+
+    #[test]
+    fn chunk_from_full_body_zero_offset() {
+        let data = b"hello".to_vec();
+        let chunk = super::chunk_from_full_body(data.clone(), 0);
+        assert_eq!(chunk.data, data);
+        assert_eq!(chunk.new_offset, 5);
+    }
+
+    #[test]
+    fn chunk_from_full_body_exact_match() {
+        let data = vec![b'Y'; 100];
+        let chunk = super::chunk_from_full_body(data, 100);
+        assert!(chunk.data.is_empty());
+        assert_eq!(chunk.new_offset, 100);
+    }
+
+    // --- fetch_private_output_range: HTTP 200 with nonzero offset ---
+
+    #[tokio::test]
+    async fn fetch_range_200_with_nonzero_offset_strips_prefix() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        // Server ignores Range header and returns full body with HTTP 200
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/private/output/raw/gh/test-org/test-repo/42/output/0/106",
+            ))
+            .and(header("Range", "bytes=5-"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'A'; 10]))
+            .mount(&server)
+            .await;
+
+        let chunk = client
+            .fetch_private_output_range(42, 0, 106, 5)
+            .await
+            .unwrap();
+        // Should only contain the 5 bytes beyond offset 5
+        assert_eq!(chunk.data.len(), 5);
+        assert_eq!(chunk.data, vec![b'A'; 5]);
+        assert_eq!(chunk.new_offset, 10);
+    }
+
+    #[tokio::test]
+    async fn fetch_range_200_stale_response_no_regression() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        // Server returns shorter response (3 bytes) when we've seen 5
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/private/output/raw/gh/test-org/test-repo/42/output/0/106",
+            ))
+            .and(header("Range", "bytes=5-"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'B'; 3]))
+            .mount(&server)
+            .await;
+
+        let chunk = client
+            .fetch_private_output_range(42, 0, 106, 5)
+            .await
+            .unwrap();
+        assert!(chunk.data.is_empty());
+        assert_eq!(chunk.new_offset, 5); // must not regress
+    }
+
+    #[tokio::test]
+    async fn fetch_range_200_exact_length_equals_offset() {
+        let server = MockServer::start().await;
+        let client = CircleCiClient::with_base_url(test_config(), server.uri());
+
+        // Server returns exactly 5 bytes (same as offset) — no new data
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/private/output/raw/gh/test-org/test-repo/42/output/0/106",
+            ))
+            .and(header("Range", "bytes=5-"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'C'; 5]))
+            .mount(&server)
+            .await;
+
+        let chunk = client
+            .fetch_private_output_range(42, 0, 106, 5)
+            .await
+            .unwrap();
+        assert!(chunk.data.is_empty());
+        assert_eq!(chunk.new_offset, 5);
     }
 }

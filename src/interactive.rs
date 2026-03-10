@@ -1,4 +1,8 @@
+use std::io::Write;
+use std::time::{Duration, Instant};
+
 use anyhow::Result;
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use dialoguer::Select;
 
 use crate::api::{CircleCiClient, LogSource};
@@ -280,39 +284,44 @@ async fn select_job(
         }
 
         let job = &items[selection - 1];
-        if let Some(job_number) = job.job_number {
-            let detail = client.fetch_job_detail(job_number).await?;
-            let steps = match detail.steps {
-                Some(ref s) if !s.is_empty() => s,
-                _ => {
-                    println!("No steps found for this job.");
-                    continue;
-                }
-            };
-
-            // Parallel job: any step has >1 actions
-            if steps.first().is_some_and(|s| s.actions.len() > 1) {
-                return Ok(State::Nodes {
-                    job_number,
-                    detail,
-                    workflow_id: workflow_id.to_string(),
-                    pipeline_number,
-                    pipeline_id: pipeline_id.to_string(),
-                });
-            } else {
-                return Ok(State::Steps {
-                    job_number,
-                    detail,
-                    node_index: None,
-                    workflow_id: workflow_id.to_string(),
-                    pipeline_number,
-                    pipeline_id: pipeline_id.to_string(),
-                });
-            }
-        } else {
+        let Some(job_number) = job.job_number else {
             println!("This job has no job number (may be pending or blocked).");
+            continue;
+        };
+        let detail = match client.fetch_job_detail(job_number).await {
+            Ok(d) => d,
+            Err(e) => {
+                println!("Could not fetch job detail: {}", e);
+                continue;
+            }
+        };
+        let steps = match detail.steps {
+            Some(ref s) if !s.is_empty() => s,
+            _ => {
+                println!("No steps found for this job.");
+                continue;
+            }
+        };
+
+        // Parallel job: any step has >1 actions
+        if steps.first().is_some_and(|s| s.actions.len() > 1) {
+            return Ok(State::Nodes {
+                job_number,
+                detail,
+                workflow_id: workflow_id.to_string(),
+                pipeline_number,
+                pipeline_id: pipeline_id.to_string(),
+            });
+        } else {
+            return Ok(State::Steps {
+                job_number,
+                detail,
+                node_index: None,
+                workflow_id: workflow_id.to_string(),
+                pipeline_number,
+                pipeline_id: pipeline_id.to_string(),
+            });
         }
-        continue;
     }
 }
 
@@ -385,29 +394,29 @@ async fn select_node(
 async fn select_step(
     client: &CircleCiClient,
     job_number: u64,
-    detail: JobDetail,
+    mut detail: JobDetail,
     node_index: Option<usize>,
     workflow_id: &str,
     pipeline_number: u64,
     pipeline_id: &str,
 ) -> Result<State> {
-    let steps = match detail.steps {
-        Some(ref s) => s,
-        None => {
-            return Ok(State::Jobs {
-                workflow_id: workflow_id.to_string(),
-                pipeline_number,
-                pipeline_id: pipeline_id.to_string(),
-            });
-        }
-    };
-
     let back_label = match node_index {
         Some(_) => ".. (back to nodes)",
         None => ".. (back to jobs)",
     };
 
     loop {
+        let steps = match detail.steps {
+            Some(ref s) => s,
+            None => {
+                return Ok(State::Jobs {
+                    workflow_id: workflow_id.to_string(),
+                    pipeline_number,
+                    pipeline_id: pipeline_id.to_string(),
+                });
+            }
+        };
+
         let mut labels: Vec<String> = vec![back_label.to_string()];
         match node_index {
             Some(ni) => {
@@ -449,37 +458,340 @@ async fn select_step(
         }
 
         let step_index = selection - 1;
-        let step = &steps[step_index];
         let action_index = node_index.unwrap_or(0);
-        let Some(action) = step.actions.get(action_index) else {
-            continue;
+
+        // Borrow steps temporarily to extract what we need for show_log
+        let (step_clone, action_clone) = {
+            let steps = detail.steps.as_ref().unwrap();
+            let step = &steps[step_index];
+            let Some(action) = step.actions.get(action_index) else {
+                continue;
+            };
+            (step.clone(), action.clone())
         };
 
-        match show_log(client, &detail, step, action, action_index).await? {
-            LogAction::Back => continue,
+        match show_log(
+            client,
+            &detail,
+            &step_clone,
+            &action_clone,
+            action_index,
+            step_index,
+        )
+        .await?
+        {
+            LogAction::Back => {
+                // Re-fetch job detail to get updated statuses and durations
+                match client.fetch_job_detail(job_number).await {
+                    Ok(refreshed) => detail = refreshed,
+                    Err(e) => {
+                        eprintln!("Warning: could not refresh job detail: {e}");
+                    }
+                }
+                continue;
+            }
             LogAction::Exit => return Ok(State::Done),
         }
     }
 }
 
-async fn show_log(
+// --- Streaming helpers ---
+
+/// RAII guard for crossterm raw mode.
+///
+/// Entering raw mode disables line buffering and echo so we can poll for
+/// individual key presses.  The guard ensures `disable_raw_mode()` is called
+/// on all exit paths — including panics and early `?` returns — so the
+/// terminal is never left in an unusable state.
+struct RawModeGuard;
+
+impl RawModeGuard {
+    fn enable() -> Result<Self> {
+        crossterm::terminal::enable_raw_mode()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
+/// Whether the given action status represents a terminal (finished) state.
+///
+/// Uses a positive-list approach: only "running" and "queued" are considered
+/// non-terminal.  Any other status (including unknown future values from the
+/// CircleCI API) is treated as finished, preventing indefinite streaming.
+fn is_step_finished(status: &str) -> bool {
+    !matches!(status, "running" | "queued")
+}
+
+/// Look up the current status string for a specific action within a job.
+///
+/// `step_index` is the positional index into `detail.steps[]` (the step array),
+/// while `node_index` selects the action within that step's `actions[]` array.
+/// In parallelism > 1 jobs each parallel node is a separate action under the
+/// same step, so `node_index` corresponds to the parallel container number.
+fn find_action_status(detail: &JobDetail, step_index: usize, node_index: usize) -> Option<String> {
+    detail
+        .steps
+        .as_ref()
+        .and_then(|steps| steps.get(step_index))
+        .and_then(|step| step.actions.get(node_index))
+        .map(|action| action.status.clone())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// Clear the in-place status indicator from the current line.
+fn clear_status_line(w: &mut impl Write) -> std::io::Result<()> {
+    write!(w, "\r\x1b[K")?;
+    w.flush()
+}
+
+/// Write the streaming status indicator on the current line (dim color).
+fn write_status_line(
+    w: &mut impl Write,
+    elapsed: Duration,
+    total_bytes: u64,
+    waiting: bool,
+) -> std::io::Result<()> {
+    let secs = elapsed.as_secs();
+    let size = format_bytes(total_bytes);
+    let indicator = if waiting { " waiting..." } else { "" };
+    write!(
+        w,
+        "\r\x1b[K\x1b[2m[{}s | {} received{}]\x1b[0m",
+        secs, size, indicator
+    )?;
+    w.flush()
+}
+
+/// Feed data into the vt100 parser and print only the newly appeared rows
+/// to the writer.  Uses a large virtual screen so rows never scroll off;
+/// tracks `last_printed_row` to emit only incremental output.
+///
+/// Returns the number of new rows printed.
+fn render_vt100_rows(
+    w: &mut impl Write,
+    parser: &mut vt100::Parser,
+    last_printed_row: &mut u16,
+    term_cols: u16,
+    data: &[u8],
+) -> std::io::Result<u16> {
+    if data.is_empty() {
+        return Ok(0);
+    }
+    parser.process(data);
+    let screen = parser.screen();
+    let cursor_row = screen.cursor_position().0;
+
+    // Print rows from last_printed_row to cursor_row (inclusive).
+    let start = *last_printed_row;
+    let mut printed = 0u16;
+    for (row_idx, row_bytes) in screen.rows_formatted(0, term_cols).enumerate() {
+        let row_idx = row_idx as u16;
+        if row_idx < start {
+            continue;
+        }
+        if row_idx > cursor_row {
+            break;
+        }
+        // Filter NUL bytes from formatted output
+        let clean: Vec<u8> = row_bytes.into_iter().filter(|&b| b != 0).collect();
+        w.write_all(&clean)?;
+        // In raw mode LF doesn't imply CR, so emit CRLF
+        w.write_all(b"\r\n")?;
+        printed += 1;
+    }
+    if printed > 0 {
+        w.flush()?;
+        *last_printed_row = cursor_row + 1;
+    }
+    Ok(printed)
+}
+
+/// Stream a running step's log output in real time.
+///
+/// Uses a large vt100 virtual screen to process cursor-control sequences
+/// (BuildKit progress bars, erase-line, cursor-up) and prints only new rows
+/// incrementally.  Output goes directly to the normal terminal scrollback,
+/// so the user can scroll up during streaming.
+///
+/// ## Polling loop timing
+///
+/// Each iteration:
+/// 1. `event::poll(50ms)` — check for key presses.
+/// 2. `fetch_private_output_range` — incremental log fetch.
+/// 3. `tokio::time::sleep(950ms)` — wait before next iteration.
+/// 4. Every 5 polls (~5 seconds) the job detail is re-fetched to check
+///    whether the step has finished.
+///
+/// ## Error handling
+///
+/// Transient fetch errors trigger adaptive backoff (950 ms → 3 s → 5 s).
+/// After 30 seconds of consecutive errors the stream stops with a message.
+#[allow(clippy::too_many_arguments)]
+async fn stream_log(
     client: &CircleCiClient,
     detail: &JobDetail,
     step: &Step,
-    action: &Action,
+    _action: &Action,
     node_index: usize,
+    step_index: usize,
+    step_id: u32,
+    task_index: u32,
 ) -> Result<LogAction> {
+    crate::output::print_node_header(detail, step, node_index, "streaming...");
+    println!("  Press Esc or q to stop streaming\n");
+
+    let mut stdout = std::io::stdout();
+    let _raw_guard = RawModeGuard::enable()?;
+
+    let (term_cols, _term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    // Large virtual screen: rows never scroll off so we can track which
+    // rows have already been printed to the real terminal.
+    let mut vt_parser = vt100::Parser::new(u16::MAX, term_cols, 0);
+    let mut last_printed_row: u16 = 0;
+
     let job_number = detail.build_num.unwrap_or(0);
-    let log = match LogSource::from_action(action, job_number) {
-        Some(source) => match client.fetch_log(&source).await {
-            Ok(content) => content,
-            Err(e) => format!("(failed to fetch log: {})", e),
-        },
-        None => String::new(),
-    };
+    let mut byte_offset: u64 = 0;
+    let mut polls_since_status_check: u32 = 0;
+    let mut first_error_at: Option<Instant> = None;
+    let mut poll_interval_ms: u64 = 950;
+    let stream_start = Instant::now();
+    let mut total_bytes: u64 = 0;
 
-    crate::output::print_node_log(detail, step, action, node_index, &log)?;
+    // Show initial status line
+    write_status_line(&mut stdout, Duration::ZERO, 0, true)?;
 
+    loop {
+        // Non-blocking key input check (50ms — below human-perceptible latency)
+        if event::poll(Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        clear_status_line(&mut stdout)?;
+                        break;
+                    }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        clear_status_line(&mut stdout)?;
+                        return Ok(LogAction::Exit);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Incremental fetch
+        match client
+            .fetch_private_output_range(job_number, task_index, step_id, byte_offset)
+            .await
+        {
+            Ok(chunk) => {
+                first_error_at = None;
+                poll_interval_ms = 950; // reset backoff
+                if !chunk.data.is_empty() {
+                    let clean: Vec<u8> = chunk.data.iter().copied().filter(|&b| b != 0).collect();
+                    total_bytes += clean.len() as u64;
+                    // Clear status line before writing new output
+                    clear_status_line(&mut stdout)?;
+                    render_vt100_rows(
+                        &mut stdout,
+                        &mut vt_parser,
+                        &mut last_printed_row,
+                        term_cols,
+                        &clean,
+                    )?;
+                    byte_offset = chunk.new_offset;
+                }
+                let elapsed = stream_start.elapsed();
+                let waiting = chunk.data.is_empty();
+                write_status_line(&mut stdout, elapsed, total_bytes, waiting)?;
+            }
+            Err(_) => {
+                let error_start = *first_error_at.get_or_insert_with(Instant::now);
+                poll_interval_ms = if poll_interval_ms <= 950 { 3000 } else { 5000 };
+                if error_start.elapsed() >= Duration::from_secs(30) {
+                    clear_status_line(&mut stdout)?;
+                    // In raw mode, need CRLF
+                    stdout.write_all(b"--- Streaming stopped (connection error) ---\r\n")?;
+                    stdout.flush()?;
+                    break;
+                }
+                let elapsed = stream_start.elapsed();
+                write_status_line(&mut stdout, elapsed, total_bytes, true)?;
+            }
+        }
+
+        // Step completion check (~every 5 polls)
+        polls_since_status_check += 1;
+        if polls_since_status_check >= 5 {
+            polls_since_status_check = 0;
+            match client.fetch_job_detail(job_number).await {
+                Ok(refreshed) => {
+                    if let Some(status) = find_action_status(&refreshed, step_index, node_index) {
+                        if is_step_finished(&status) {
+                            // Final fetch to catch any remaining output
+                            if let Ok(final_chunk) = client
+                                .fetch_private_output_range(
+                                    job_number,
+                                    task_index,
+                                    step_id,
+                                    byte_offset,
+                                )
+                                .await
+                            {
+                                if !final_chunk.data.is_empty() {
+                                    let clean: Vec<u8> = final_chunk
+                                        .data
+                                        .iter()
+                                        .copied()
+                                        .filter(|&b| b != 0)
+                                        .collect();
+                                    clear_status_line(&mut stdout)?;
+                                    render_vt100_rows(
+                                        &mut stdout,
+                                        &mut vt_parser,
+                                        &mut last_printed_row,
+                                        term_cols,
+                                        &clean,
+                                    )?;
+                                }
+                            }
+                            clear_status_line(&mut stdout)?;
+                            let msg = format!("--- {} [{}] ---\r\n", step.name, status);
+                            stdout.write_all(msg.as_bytes())?;
+                            stdout.flush()?;
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: status check failed: {e}");
+                }
+            }
+        }
+
+        // Wait until next poll
+        tokio::time::sleep(Duration::from_millis(poll_interval_ms)).await;
+    }
+
+    drop(_raw_guard);
+
+    show_post_log_menu()
+}
+
+fn show_post_log_menu() -> Result<LogAction> {
     let selection = Select::new()
         .with_prompt("Log view")
         .items(&["Back to steps", "Exit"])
@@ -491,6 +803,39 @@ async fn show_log(
         Some(0) => Ok(LogAction::Back),
         _ => Ok(LogAction::Exit),
     }
+}
+
+async fn show_log(
+    client: &CircleCiClient,
+    detail: &JobDetail,
+    step: &Step,
+    action: &Action,
+    node_index: usize,
+    step_index: usize,
+) -> Result<LogAction> {
+    // Streaming mode for running steps with private API available
+    if action.status == "running" {
+        if let (Some(step_id), Some(task_index)) = (action.step, action.index) {
+            return stream_log(
+                client, detail, step, action, node_index, step_index, step_id, task_index,
+            )
+            .await;
+        }
+    }
+
+    // Existing logic for completed steps or when streaming is unavailable
+    let job_number = detail.build_num.unwrap_or(0);
+    let log = match LogSource::from_action(action, job_number) {
+        Some(source) => match client.fetch_log(&source).await {
+            Ok(content) => content,
+            Err(e) => format!("(failed to fetch log: {})", e),
+        },
+        None => String::new(),
+    };
+
+    crate::output::print_node_log(detail, step, action, node_index, &log)?;
+
+    show_post_log_menu()
 }
 
 // --- Aggregate helpers ---
@@ -517,9 +862,8 @@ fn aggregate_node_duration(steps: &[Step], node_index: usize) -> Option<u64> {
     let mut sum: u64 = 0;
     let mut any = false;
     for step in steps {
-        #[allow(clippy::collapsible_if)]
         if let Some(action) = step.actions.get(node_index) {
-            if let Some(ms) = action.run_time_millis {
+            if let Some(ms) = crate::output::compute_elapsed_millis(action) {
                 sum += ms;
                 any = true;
             }
@@ -545,7 +889,7 @@ fn format_step_item_for_node(step: &Step, node_index: usize) -> String {
     let Some(action) = step.actions.get(node_index) else {
         return format!("[{:<7}] {:<40} -", "-", step.name);
     };
-    let duration = crate::output::format_duration(action.run_time_millis);
+    let duration = crate::output::format_duration(crate::output::compute_elapsed_millis(action));
     format!(
         "[{}] {:<40} {}",
         colorize_status_padded(&action.status, 7),
@@ -558,7 +902,7 @@ fn format_step_item(step: &Step) -> String {
     let Some(action) = step.actions.first() else {
         return format!("[{:<7}] {:<40} -", "-", step.name);
     };
-    let duration = crate::output::format_duration(action.run_time_millis);
+    let duration = crate::output::format_duration(crate::output::compute_elapsed_millis(action));
     format!(
         "[{}] {:<40} {}",
         colorize_status_padded(&action.status, 7),
@@ -766,6 +1110,8 @@ mod tests {
             output_url: None,
             step: None,
             index: None,
+            start_time: None,
+            end_time: None,
         }
     }
 
@@ -1225,5 +1571,251 @@ mod tests {
         let result = format_node_item(&steps, 1);
         assert!(result.contains("failed"));
         assert!(result.contains("28s"));
+    }
+
+    // --- is_step_finished tests ---
+
+    #[test]
+    fn is_step_finished_success() {
+        assert!(is_step_finished("success"));
+    }
+
+    #[test]
+    fn is_step_finished_failed() {
+        assert!(is_step_finished("failed"));
+    }
+
+    #[test]
+    fn is_step_finished_canceled() {
+        assert!(is_step_finished("canceled"));
+        assert!(is_step_finished("cancelled"));
+    }
+
+    #[test]
+    fn is_step_finished_timedout() {
+        assert!(is_step_finished("timedout"));
+    }
+
+    #[test]
+    fn is_step_finished_infrastructure_fail() {
+        assert!(is_step_finished("infrastructure_fail"));
+    }
+
+    #[test]
+    fn is_step_finished_not_run() {
+        assert!(is_step_finished("not_run"));
+    }
+
+    #[test]
+    fn is_step_finished_running() {
+        assert!(!is_step_finished("running"));
+    }
+
+    #[test]
+    fn is_step_finished_queued() {
+        assert!(!is_step_finished("queued"));
+    }
+
+    #[test]
+    fn is_step_finished_unknown_status() {
+        // Unknown/future status values should be treated as finished
+        assert!(is_step_finished("some_new_status"));
+        assert!(is_step_finished(""));
+        assert!(is_step_finished("blocked"));
+    }
+
+    // --- find_action_status tests ---
+
+    #[test]
+    fn find_action_status_found() {
+        let detail = JobDetail {
+            steps: Some(vec![
+                make_step_with_actions("s0", vec![make_action("a0", "success", None)]),
+                make_step_with_actions(
+                    "s1",
+                    vec![
+                        make_action("a0", "running", None),
+                        make_action("a1", "failed", None),
+                    ],
+                ),
+            ]),
+            status: None,
+            build_num: None,
+            workflows: None,
+        };
+        assert_eq!(
+            find_action_status(&detail, 1, 0),
+            Some("running".to_string())
+        );
+        assert_eq!(
+            find_action_status(&detail, 1, 1),
+            Some("failed".to_string())
+        );
+    }
+
+    #[test]
+    fn find_action_status_step_out_of_range() {
+        let detail = JobDetail {
+            steps: Some(vec![make_step_with_actions(
+                "s0",
+                vec![make_action("a0", "success", None)],
+            )]),
+            status: None,
+            build_num: None,
+            workflows: None,
+        };
+        assert_eq!(find_action_status(&detail, 5, 0), None);
+    }
+
+    #[test]
+    fn find_action_status_steps_none() {
+        let detail = JobDetail {
+            steps: None,
+            status: None,
+            build_num: None,
+            workflows: None,
+        };
+        assert_eq!(find_action_status(&detail, 0, 0), None);
+    }
+
+    // --- format_bytes tests ---
+
+    #[test]
+    fn format_bytes_small() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+    }
+
+    #[test]
+    fn format_bytes_kilobytes() {
+        assert_eq!(format_bytes(1024), "1.0 KB");
+        assert_eq!(format_bytes(4300), "4.2 KB");
+    }
+
+    #[test]
+    fn format_bytes_megabytes() {
+        assert_eq!(format_bytes(1048576), "1.0 MB");
+        assert_eq!(format_bytes(2621440), "2.5 MB");
+    }
+
+    // --- clear_status_line / write_status_line tests ---
+
+    #[test]
+    fn write_status_line_normal() {
+        let mut buf = Vec::new();
+        write_status_line(&mut buf, Duration::from_secs(5), 4300, false).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("5s"));
+        assert!(s.contains("4.2 KB"));
+        assert!(!s.contains("waiting"));
+    }
+
+    #[test]
+    fn write_status_line_waiting() {
+        let mut buf = Vec::new();
+        write_status_line(&mut buf, Duration::from_secs(10), 0, true).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("10s"));
+        assert!(s.contains("waiting"));
+    }
+
+    // --- render_vt100_rows tests ---
+
+    #[test]
+    fn render_vt100_rows_simple_text() {
+        let mut parser = vt100::Parser::new(u16::MAX, 80, 0);
+        let mut last_row = 0u16;
+        let mut buf = Vec::new();
+        let printed =
+            render_vt100_rows(&mut buf, &mut parser, &mut last_row, 80, b"Hello, world!\n")
+                .unwrap();
+        let output = String::from_utf8_lossy(&buf);
+        assert!(output.contains("Hello, world!"));
+        assert!(printed > 0);
+        assert!(last_row > 0);
+    }
+
+    #[test]
+    fn render_vt100_rows_empty_data() {
+        let mut parser = vt100::Parser::new(u16::MAX, 80, 0);
+        let mut last_row = 0u16;
+        let mut buf = Vec::new();
+        let printed = render_vt100_rows(&mut buf, &mut parser, &mut last_row, 80, b"").unwrap();
+        assert_eq!(printed, 0);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn render_vt100_rows_cursor_overwrite() {
+        let mut parser = vt100::Parser::new(u16::MAX, 80, 0);
+        let mut last_row = 0u16;
+        let mut buf = Vec::new();
+
+        // cursor-up + erase-line + new text overwrites "Line A"
+        render_vt100_rows(
+            &mut buf,
+            &mut parser,
+            &mut last_row,
+            80,
+            b"Line A\n\x1b[1A\x1b[2KLine B\n",
+        )
+        .unwrap();
+        let screen_text = parser.screen().contents();
+        assert!(screen_text.contains("Line B"));
+        assert!(!screen_text.contains("Line A"));
+    }
+
+    #[test]
+    fn render_vt100_rows_carriage_return() {
+        let mut parser = vt100::Parser::new(u16::MAX, 80, 0);
+        let mut last_row = 0u16;
+        let mut buf = Vec::new();
+
+        render_vt100_rows(
+            &mut buf,
+            &mut parser,
+            &mut last_row,
+            80,
+            b"Progress: 50%\rProgress: 100%",
+        )
+        .unwrap();
+        let screen_text = parser.screen().contents();
+        assert!(screen_text.contains("Progress: 100%"));
+        assert!(!screen_text.contains("50%"));
+    }
+
+    #[test]
+    fn render_vt100_rows_incremental_chunks() {
+        let mut parser = vt100::Parser::new(u16::MAX, 80, 0);
+        let mut last_row = 0u16;
+        let mut buf = Vec::new();
+
+        render_vt100_rows(&mut buf, &mut parser, &mut last_row, 80, b"chunk1\n").unwrap();
+        render_vt100_rows(&mut buf, &mut parser, &mut last_row, 80, b"chunk2\n").unwrap();
+        render_vt100_rows(&mut buf, &mut parser, &mut last_row, 80, b"chunk3\n").unwrap();
+
+        let screen_text = parser.screen().contents();
+        assert!(screen_text.contains("chunk1"));
+        assert!(screen_text.contains("chunk2"));
+        assert!(screen_text.contains("chunk3"));
+    }
+
+    #[test]
+    fn render_vt100_rows_nul_filtered() {
+        let mut parser = vt100::Parser::new(u16::MAX, 80, 0);
+        let mut last_row = 0u16;
+        let mut buf = Vec::new();
+
+        render_vt100_rows(
+            &mut buf,
+            &mut parser,
+            &mut last_row,
+            80,
+            b"Hello\x00World\n",
+        )
+        .unwrap();
+        // Output should not contain NUL bytes
+        assert!(!buf.contains(&0u8));
     }
 }

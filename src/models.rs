@@ -31,6 +31,8 @@ pub struct Action {
     pub output_url: Option<String>,
     pub step: Option<u32>,
     pub index: Option<u32>,
+    pub start_time: Option<String>,
+    pub end_time: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -297,5 +299,25 @@ mod tests {
         assert_eq!(resp.items.len(), 1);
         assert_eq!(resp.items[0].name, "test");
         assert_eq!(resp.next_page_token.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn deserialize_action_with_timing() {
+        let json = r#"{"name":"build","status":"running","run_time_millis":null,
+            "output_url":null,"step":0,"index":0,
+            "start_time":"2024-06-01T12:00:00Z","end_time":null}"#;
+        let action: Action = serde_json::from_str(json).unwrap();
+        assert_eq!(action.start_time.as_deref(), Some("2024-06-01T12:00:00Z"));
+        assert!(action.end_time.is_none());
+    }
+
+    #[test]
+    fn deserialize_action_without_timing() {
+        let json = r#"{"name":"build","status":"success","run_time_millis":5000,
+            "output_url":null,"step":0,"index":0}"#;
+        let action: Action = serde_json::from_str(json).unwrap();
+        assert!(action.start_time.is_none());
+        assert!(action.end_time.is_none());
+        assert_eq!(action.run_time_millis, Some(5000));
     }
 }

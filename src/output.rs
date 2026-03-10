@@ -46,19 +46,53 @@ fn filter_log_lines(content: &str, grep: Option<&Regex>) -> String {
 /// When `preserve_colors` is true, retains ANSI color codes (for terminal output).
 /// When false, returns plain text (for file/pipe/JSON).
 pub fn render_log(content: &str, preserve_colors: bool) -> String {
-    // Fast path: no escape sequences
-    if !content.as_bytes().contains(&0x1b) {
+    // Fast path: no escape sequences, no NUL bytes, and no literal ^@ (caret notation)
+    if !content.as_bytes().contains(&0x1b)
+        && !content.as_bytes().contains(&0)
+        && !content.contains("^@")
+    {
         return content.to_string();
     }
+    // Filter NUL bytes (0x00) and literal "^@" (caret notation for NUL that
+    // appears in some CI log data) before processing.
+    let without_caret_at = content.replace("^@", "");
+    let clean: Vec<u8> = without_caret_at.bytes().filter(|&b| b != 0).collect();
+    // If no escape sequences remain, return as-is
+    if !clean.contains(&0x1b) {
+        return String::from_utf8_lossy(&clean).to_string();
+    }
     let mut parser = vt100::Parser::new(u16::MAX, 200, 0);
-    parser.process(content.as_bytes());
+    parser.process(&clean);
     if preserve_colors {
-        String::from_utf8_lossy(&parser.screen().contents_formatted()).to_string()
+        let formatted = parser.screen().contents_formatted();
+        let filtered: Vec<u8> = formatted.into_iter().filter(|&b| b != 0).collect();
+        String::from_utf8_lossy(&filtered).to_string()
     } else {
-        parser.screen().contents()
+        parser.screen().contents().replace('\0', "")
     }
 }
 
+/// Compute elapsed time in milliseconds for an action.
+/// Prefers `run_time_millis` (set by API for completed actions).
+/// For running actions (no `run_time_millis`), computes from `start_time` to now.
+pub fn compute_elapsed_millis(action: &Action) -> Option<u64> {
+    if let Some(ms) = action.run_time_millis {
+        return Some(ms);
+    }
+    if let Some(ref start) = action.start_time {
+        if action.end_time.is_none() {
+            if let Ok(dt) = DateTime::parse_from_rfc3339(start) {
+                let elapsed = chrono::Utc::now().signed_duration_since(dt);
+                if elapsed.num_milliseconds() > 0 {
+                    return Some(elapsed.num_milliseconds() as u64);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Format elapsed time with "~" prefix to indicate approximate/in-progress value.
 pub fn format_duration(millis: Option<u64>) -> String {
     match millis {
         Some(ms) => {
@@ -174,6 +208,27 @@ pub fn print_job_log(
         }
     }
     Ok(())
+}
+
+/// Print the header block shown above log output for a single step/node.
+///
+/// Used by both `stream_log` (live streaming) and `print_node_log` (static
+/// log display) to provide a consistent header format: workflow name, job
+/// name, node index, step name, and status.
+pub fn print_node_header(detail: &JobDetail, step: &Step, node_index: usize, status_label: &str) {
+    if let Some(ref wf) = detail.workflows {
+        if let Some(ref wf_name) = wf.workflow_name {
+            print!("Workflow: {}  ", wf_name);
+        }
+        if let Some(ref job_name) = wf.job_name {
+            print!("Job: {}  ", job_name);
+        }
+        println!();
+    }
+
+    println!("Node: {}  Step: {}", node_index, step.name.bold());
+    println!("  [{}]", colorize_status(status_label));
+    println!();
 }
 
 pub fn print_node_log(
@@ -524,6 +579,42 @@ mod tests {
         assert!(result.contains("done"));
     }
 
+    #[test]
+    fn render_log_filters_nul_bytes() {
+        let input = "hello\x00world";
+        let result = render_log(input, false);
+        assert_eq!(result, "helloworld");
+        assert!(!result.contains('\0'));
+    }
+
+    #[test]
+    fn render_log_filters_nul_with_ansi() {
+        let input = "\x1b[34mblue\x00text\x1b[0m";
+        let result = render_log(input, false);
+        assert_eq!(result, "bluetext");
+        assert!(!result.contains('\0'));
+    }
+
+    #[test]
+    fn render_log_docker_compose_no_caret_at() {
+        // Docker compose output with ✔, cursor-up, erase-line
+        let input = " \u{2714} Container test  Running0.0s \n\x1b[1A\x1b[2K \u{2714} Container test  Running0.0s \nBundle complete!";
+        let result_plain = render_log(input, false);
+        let result_color = render_log(input, true);
+        // Should not contain literal ^@ from NUL cells
+        assert!(
+            !result_plain.contains("^@"),
+            "plain contains ^@: {:?}",
+            result_plain
+        );
+        assert!(
+            !result_color.contains("^@"),
+            "color contains ^@: {:?}",
+            result_color
+        );
+        assert!(result_plain.contains("Bundle complete!"));
+    }
+
     // --- build_job_log_json tests ---
 
     fn make_detail(
@@ -554,6 +645,8 @@ mod tests {
             output_url: None,
             step: None,
             index: None,
+            start_time: None,
+            end_time: None,
         }
     }
 
@@ -591,6 +684,8 @@ mod tests {
             step: Some(101),
             index: Some(0),
             output_url: Some("https://example.com/output".to_string()),
+            start_time: None,
+            end_time: None,
         };
         let detail = make_detail(
             Some(vec![make_step("build", vec![action])]),
@@ -920,5 +1015,70 @@ mod tests {
         let action = &step.actions[0];
         let result = print_node_log(&detail, step, action, 0, "log content");
         assert!(result.is_ok());
+    }
+
+    // --- compute_elapsed_millis tests ---
+
+    #[test]
+    fn compute_elapsed_prefers_run_time_millis() {
+        let action = Action {
+            name: "test".to_string(),
+            status: "success".to_string(),
+            run_time_millis: Some(5000),
+            output_url: None,
+            step: None,
+            index: None,
+            start_time: Some("2020-01-01T00:00:00Z".to_string()),
+            end_time: None,
+        };
+        assert_eq!(compute_elapsed_millis(&action), Some(5000));
+    }
+
+    #[test]
+    fn compute_elapsed_from_start_time() {
+        let recent = chrono::Utc::now() - chrono::Duration::seconds(30);
+        let action = Action {
+            name: "test".to_string(),
+            status: "running".to_string(),
+            run_time_millis: None,
+            output_url: None,
+            step: None,
+            index: None,
+            start_time: Some(recent.to_rfc3339()),
+            end_time: None,
+        };
+        let ms = compute_elapsed_millis(&action).unwrap();
+        // Should be approximately 30 seconds (allow 5s tolerance)
+        assert!(ms >= 25_000 && ms <= 35_000, "elapsed was {}ms", ms);
+    }
+
+    #[test]
+    fn compute_elapsed_none_when_no_data() {
+        let action = Action {
+            name: "test".to_string(),
+            status: "running".to_string(),
+            run_time_millis: None,
+            output_url: None,
+            step: None,
+            index: None,
+            start_time: None,
+            end_time: None,
+        };
+        assert_eq!(compute_elapsed_millis(&action), None);
+    }
+
+    #[test]
+    fn compute_elapsed_none_when_ended() {
+        let action = Action {
+            name: "test".to_string(),
+            status: "success".to_string(),
+            run_time_millis: None,
+            output_url: None,
+            step: None,
+            index: None,
+            start_time: Some("2020-01-01T00:00:00Z".to_string()),
+            end_time: Some("2020-01-01T00:01:00Z".to_string()),
+        };
+        assert_eq!(compute_elapsed_millis(&action), None);
     }
 }
