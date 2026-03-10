@@ -30,7 +30,7 @@ show_log()
   └── loop
         ├── event::poll(50ms)         ← check for Esc / q / Ctrl+C
         ├── fetch_private_output_range(byte_offset)
-        │     └── write new bytes to stdout (with CRLF conversion)
+        │     └── vt100 parser → rows_formatted → print new rows
         ├── every 5 polls: re-fetch job detail
         │     └── is_step_finished()?
         │           ├── yes ─→ final fetch, print status, break
@@ -50,15 +50,30 @@ request only the bytes beyond the current `byte_offset`.
 | 204         | No new output yet                | unchanged                           |
 | 416         | Range not satisfiable            | unchanged                           |
 
-### Why not vt100 rendering?
+### vt100 incremental rendering
 
-During streaming the raw bytes from the API are written directly to the
-terminal.  The vt100 rendering pass (used for completed-log display) resolves
-cursor-control sequences to a final screen state, which would destroy the
-incremental "append-only" nature of streaming.  By passing raw bytes through,
-the user's terminal handles escape sequences natively — including animated
-progress indicators like Docker buildx output — exactly as they would in a
-real terminal session.
+Streaming uses a `vt100::Parser` with a very large virtual screen (`u16::MAX`
+rows) to process incoming bytes.  Each chunk is fed into the parser via
+`parser.process(data)`, then `render_vt100_rows` prints only the new rows
+(from `last_printed_row` to `cursor_position().0`) using `rows_formatted()`.
+
+Because the virtual screen has effectively unlimited rows, content never
+scrolls off the top.  The `last_printed_row` tracker ensures each row is
+printed to the real terminal exactly once.  This means output goes directly
+into the terminal's normal scrollback buffer — the user can scroll up during
+streaming, just like `tail -f`.
+
+This approach correctly handles cursor-control sequences used by tools like
+Docker BuildKit (cursor-up, erase-line, carriage-return-based progress bars).
+Without vt100 rendering, these sequences would pass through raw and produce
+corrupted output — e.g., 91 lines of expected output could balloon to 14,000+
+lines.
+
+The terminal width is obtained via `crossterm::terminal::size()` (with an
+`(80, 24)` fallback) so the virtual screen columns match the real terminal.
+
+NUL bytes (`\x00`), which appear in some CI log data, are filtered both at
+input (before feeding to the parser) and at output (from `rows_formatted`).
 
 ## Polling strategy
 
@@ -99,23 +114,6 @@ When a successful fetch occurs, the interval and error timer reset.
 constructor / `Drop` pair.  This guarantees the terminal is restored even if
 the streaming loop exits via `?`, an error, or a panic — without requiring
 manual cleanup at every exit point.
-
-### CRLF conversion
-
-With LF → CRLF translation disabled, a bare `\n` moves the cursor down one
-line without returning to column 0, producing "staircase" output:
-
-```
-line 1
-      line 2
-            line 3
-```
-
-`write_with_crlf` replaces each `\n` (0x0A) with `\r\n` before writing.
-
-This byte-level replacement is safe for ANSI escape sequences: the ECMA-48
-standard reserves bytes 0x20–0x7E for parameter and intermediate bytes within
-escape sequences, so 0x0A (LF) never appears inside a sequence.
 
 ## Edge cases
 

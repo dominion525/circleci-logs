@@ -542,27 +542,6 @@ fn find_action_status(detail: &JobDetail, step_index: usize, node_index: usize) 
         .map(|action| action.status.clone())
 }
 
-/// Write raw bytes to the terminal, converting lone LF (`\n`) to CRLF (`\r\n`).
-///
-/// In raw mode the terminal driver does not perform automatic newline
-/// translation, so a bare `\n` moves the cursor down without returning to
-/// column 0, producing staircase output.  This function adds `\r` before
-/// every `\n` to restore normal line-break behavior.
-///
-/// This byte-level replacement is safe even when `data` contains ANSI escape
-/// sequences: no standard escape sequence uses `0x0A` (LF) as a parameter
-/// byte, so replacing it never corrupts an escape sequence.
-fn write_with_crlf(w: &mut impl Write, data: &[u8]) -> std::io::Result<()> {
-    for &byte in data {
-        if byte == b'\n' {
-            w.write_all(b"\r\n")?;
-        } else {
-            w.write_all(&[byte])?;
-        }
-    }
-    w.flush()
-}
-
 fn format_bytes(bytes: u64) -> String {
     if bytes < 1024 {
         format!("{} B", bytes)
@@ -597,31 +576,70 @@ fn write_status_line(
     w.flush()
 }
 
+/// Feed data into the vt100 parser and print only the newly appeared rows
+/// to the writer.  Uses a large virtual screen so rows never scroll off;
+/// tracks `last_printed_row` to emit only incremental output.
+///
+/// Returns the number of new rows printed.
+fn render_vt100_rows(
+    w: &mut impl Write,
+    parser: &mut vt100::Parser,
+    last_printed_row: &mut u16,
+    term_cols: u16,
+    data: &[u8],
+) -> std::io::Result<u16> {
+    if data.is_empty() {
+        return Ok(0);
+    }
+    parser.process(data);
+    let screen = parser.screen();
+    let cursor_row = screen.cursor_position().0;
+
+    // Print rows from last_printed_row to cursor_row (inclusive).
+    let start = *last_printed_row;
+    let mut printed = 0u16;
+    for (row_idx, row_bytes) in screen.rows_formatted(0, term_cols).enumerate() {
+        let row_idx = row_idx as u16;
+        if row_idx < start {
+            continue;
+        }
+        if row_idx > cursor_row {
+            break;
+        }
+        // Filter NUL bytes from formatted output
+        let clean: Vec<u8> = row_bytes.into_iter().filter(|&b| b != 0).collect();
+        w.write_all(&clean)?;
+        // In raw mode LF doesn't imply CR, so emit CRLF
+        w.write_all(b"\r\n")?;
+        printed += 1;
+    }
+    if printed > 0 {
+        w.flush()?;
+        *last_printed_row = cursor_row + 1;
+    }
+    Ok(printed)
+}
+
 /// Stream a running step's log output in real time.
 ///
-/// Enters crossterm raw mode to capture individual key presses, then runs a
-/// polling loop that alternates between checking for user input and fetching
-/// new log bytes from the CircleCI private API.
+/// Uses a large vt100 virtual screen to process cursor-control sequences
+/// (BuildKit progress bars, erase-line, cursor-up) and prints only new rows
+/// incrementally.  Output goes directly to the normal terminal scrollback,
+/// so the user can scroll up during streaming.
 ///
 /// ## Polling loop timing
 ///
 /// Each iteration:
-/// 1. `event::poll(50ms)` — check for key presses.  50 ms is below the
-///    human-perceptible latency threshold (~100 ms), so key presses feel
-///    instant while keeping CPU usage negligible.
+/// 1. `event::poll(50ms)` — check for key presses.
 /// 2. `fetch_private_output_range` — incremental log fetch.
 /// 3. `tokio::time::sleep(950ms)` — wait before next iteration.
-///    Together with the 50 ms poll this gives ~1 second per cycle, balancing
-///    real-time feel against API load.
 /// 4. Every 5 polls (~5 seconds) the job detail is re-fetched to check
-///    whether the step has finished.  5 seconds is short enough that the
-///    user rarely waits long after completion.
+///    whether the step has finished.
 ///
 /// ## Error handling
 ///
 /// Transient fetch errors trigger adaptive backoff (950 ms → 3 s → 5 s).
-/// After 3 consecutive errors the stream stops with a message rather than
-/// spinning indefinitely.
+/// After 30 seconds of consecutive errors the stream stops with a message.
 #[allow(clippy::too_many_arguments)]
 async fn stream_log(
     client: &CircleCiClient,
@@ -633,12 +651,17 @@ async fn stream_log(
     step_id: u32,
     task_index: u32,
 ) -> Result<LogAction> {
-    // Print header in normal mode
     crate::output::print_node_header(detail, step, node_index, "streaming...");
     println!("  Press Esc or q to stop streaming\n");
 
-    let _guard = RawModeGuard::enable()?;
     let mut stdout = std::io::stdout();
+    let _raw_guard = RawModeGuard::enable()?;
+
+    let (term_cols, _term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    // Large virtual screen: rows never scroll off so we can track which
+    // rows have already been printed to the real terminal.
+    let mut vt_parser = vt100::Parser::new(u16::MAX, term_cols, 0);
+    let mut last_printed_row: u16 = 0;
 
     let job_number = detail.build_num.unwrap_or(0);
     let mut byte_offset: u64 = 0;
@@ -647,7 +670,9 @@ async fn stream_log(
     let mut poll_interval_ms: u64 = 950;
     let stream_start = Instant::now();
     let mut total_bytes: u64 = 0;
-    let mut status_line_visible = false;
+
+    // Show initial status line
+    write_status_line(&mut stdout, Duration::ZERO, 0, true)?;
 
     loop {
         // Non-blocking key input check (50ms — below human-perceptible latency)
@@ -655,20 +680,11 @@ async fn stream_log(
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => {
-                        if status_line_visible {
-                            clear_status_line(&mut stdout)?;
-                        }
-                        write!(stdout, "\r\n")?;
-                        stdout.flush()?;
-                        drop(_guard);
-                        return show_post_log_menu();
+                        clear_status_line(&mut stdout)?;
+                        break;
                     }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if status_line_visible {
-                            clear_status_line(&mut stdout)?;
-                        }
-                        write!(stdout, "\r\n")?;
-                        stdout.flush()?;
+                        clear_status_line(&mut stdout)?;
                         return Ok(LogAction::Exit);
                     }
                     _ => {}
@@ -685,38 +701,35 @@ async fn stream_log(
                 first_error_at = None;
                 poll_interval_ms = 950; // reset backoff
                 if !chunk.data.is_empty() {
-                    if status_line_visible {
-                        clear_status_line(&mut stdout)?;
-                    }
-                    total_bytes += chunk.data.len() as u64;
-                    write_with_crlf(&mut stdout, &chunk.data)?;
+                    let clean: Vec<u8> = chunk.data.iter().copied().filter(|&b| b != 0).collect();
+                    total_bytes += clean.len() as u64;
+                    // Clear status line before writing new output
+                    clear_status_line(&mut stdout)?;
+                    render_vt100_rows(
+                        &mut stdout,
+                        &mut vt_parser,
+                        &mut last_printed_row,
+                        term_cols,
+                        &clean,
+                    )?;
                     byte_offset = chunk.new_offset;
                 }
-                // Show/update the status indicator
                 let elapsed = stream_start.elapsed();
                 let waiting = chunk.data.is_empty();
                 write_status_line(&mut stdout, elapsed, total_bytes, waiting)?;
-                status_line_visible = true;
             }
             Err(_) => {
                 let error_start = *first_error_at.get_or_insert_with(Instant::now);
-                // Adaptive backoff for errors
                 poll_interval_ms = if poll_interval_ms <= 950 { 3000 } else { 5000 };
                 if error_start.elapsed() >= Duration::from_secs(30) {
-                    if status_line_visible {
-                        clear_status_line(&mut stdout)?;
-                    }
-                    write!(
-                        stdout,
-                        "\r\n--- Streaming stopped (connection error) ---\r\n"
-                    )?;
+                    clear_status_line(&mut stdout)?;
+                    // In raw mode, need CRLF
+                    stdout.write_all(b"--- Streaming stopped (connection error) ---\r\n")?;
                     stdout.flush()?;
                     break;
                 }
-                // Show status with waiting indication during errors
                 let elapsed = stream_start.elapsed();
                 write_status_line(&mut stdout, elapsed, total_bytes, true)?;
-                status_line_visible = true;
             }
         }
 
@@ -730,9 +743,6 @@ async fn stream_log(
                         find_action_status(&refreshed, step_index, node_index)
                     {
                         if is_step_finished(&status) {
-                            if status_line_visible {
-                                clear_status_line(&mut stdout)?;
-                            }
                             // Final fetch to catch any remaining output
                             if let Ok(final_chunk) = client
                                 .fetch_private_output_range(
@@ -744,14 +754,25 @@ async fn stream_log(
                                 .await
                             {
                                 if !final_chunk.data.is_empty() {
-                                    write_with_crlf(&mut stdout, &final_chunk.data)?;
+                                    let clean: Vec<u8> = final_chunk
+                                        .data
+                                        .iter()
+                                        .copied()
+                                        .filter(|&b| b != 0)
+                                        .collect();
+                                    clear_status_line(&mut stdout)?;
+                                    render_vt100_rows(
+                                        &mut stdout,
+                                        &mut vt_parser,
+                                        &mut last_printed_row,
+                                        term_cols,
+                                        &clean,
+                                    )?;
                                 }
                             }
-                            write!(
-                                stdout,
-                                "\r\n--- {} [{}] ---\r\n",
-                                step.name, status
-                            )?;
+                            clear_status_line(&mut stdout)?;
+                            let msg = format!("--- {} [{}] ---\r\n", step.name, status);
+                            stdout.write_all(msg.as_bytes())?;
                             stdout.flush()?;
                             break;
                         }
@@ -767,8 +788,8 @@ async fn stream_log(
         tokio::time::sleep(Duration::from_millis(poll_interval_ms)).await;
     }
 
-    // Drop guard before showing menu
-    drop(_guard);
+    drop(_raw_guard);
+
     show_post_log_menu()
 }
 
@@ -1659,37 +1680,6 @@ mod tests {
         assert_eq!(find_action_status(&detail, 0, 0), None);
     }
 
-    // --- write_with_crlf tests ---
-
-    #[test]
-    fn write_with_crlf_converts_newlines() {
-        let mut buf = Vec::new();
-        write_with_crlf(&mut buf, b"hello\nworld\n").unwrap();
-        assert_eq!(buf, b"hello\r\nworld\r\n");
-    }
-
-    #[test]
-    fn write_with_crlf_no_newlines() {
-        let mut buf = Vec::new();
-        write_with_crlf(&mut buf, b"hello world").unwrap();
-        assert_eq!(buf, b"hello world");
-    }
-
-    #[test]
-    fn write_with_crlf_empty() {
-        let mut buf = Vec::new();
-        write_with_crlf(&mut buf, b"").unwrap();
-        assert!(buf.is_empty());
-    }
-
-    #[test]
-    fn write_with_crlf_binary_data_passthrough() {
-        let mut buf = Vec::new();
-        let data = [0x00, 0x01, 0xFF, 0x0A, 0x42]; // 0x0A = \n
-        write_with_crlf(&mut buf, &data).unwrap();
-        assert_eq!(buf, [0x00, 0x01, 0xFF, 0x0D, 0x0A, 0x42]);
-    }
-
     // --- format_bytes tests ---
 
     #[test]
@@ -1714,13 +1704,6 @@ mod tests {
     // --- clear_status_line / write_status_line tests ---
 
     #[test]
-    fn clear_status_line_output() {
-        let mut buf = Vec::new();
-        clear_status_line(&mut buf).unwrap();
-        assert_eq!(buf, b"\r\x1b[K");
-    }
-
-    #[test]
     fn write_status_line_normal() {
         let mut buf = Vec::new();
         write_status_line(&mut buf, Duration::from_secs(5), 4300, false).unwrap();
@@ -1737,5 +1720,105 @@ mod tests {
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains("10s"));
         assert!(s.contains("waiting"));
+    }
+
+    // --- render_vt100_rows tests ---
+
+    #[test]
+    fn render_vt100_rows_simple_text() {
+        let mut parser = vt100::Parser::new(u16::MAX, 80, 0);
+        let mut last_row = 0u16;
+        let mut buf = Vec::new();
+        let printed =
+            render_vt100_rows(&mut buf, &mut parser, &mut last_row, 80, b"Hello, world!\n")
+                .unwrap();
+        let output = String::from_utf8_lossy(&buf);
+        assert!(output.contains("Hello, world!"));
+        assert!(printed > 0);
+        assert!(last_row > 0);
+    }
+
+    #[test]
+    fn render_vt100_rows_empty_data() {
+        let mut parser = vt100::Parser::new(u16::MAX, 80, 0);
+        let mut last_row = 0u16;
+        let mut buf = Vec::new();
+        let printed =
+            render_vt100_rows(&mut buf, &mut parser, &mut last_row, 80, b"").unwrap();
+        assert_eq!(printed, 0);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn render_vt100_rows_cursor_overwrite() {
+        let mut parser = vt100::Parser::new(u16::MAX, 80, 0);
+        let mut last_row = 0u16;
+        let mut buf = Vec::new();
+
+        // cursor-up + erase-line + new text overwrites "Line A"
+        render_vt100_rows(
+            &mut buf,
+            &mut parser,
+            &mut last_row,
+            80,
+            b"Line A\n\x1b[1A\x1b[2KLine B\n",
+        )
+        .unwrap();
+        let screen_text = parser.screen().contents();
+        assert!(screen_text.contains("Line B"));
+        assert!(!screen_text.contains("Line A"));
+    }
+
+    #[test]
+    fn render_vt100_rows_carriage_return() {
+        let mut parser = vt100::Parser::new(u16::MAX, 80, 0);
+        let mut last_row = 0u16;
+        let mut buf = Vec::new();
+
+        render_vt100_rows(
+            &mut buf,
+            &mut parser,
+            &mut last_row,
+            80,
+            b"Progress: 50%\rProgress: 100%",
+        )
+        .unwrap();
+        let screen_text = parser.screen().contents();
+        assert!(screen_text.contains("Progress: 100%"));
+        assert!(!screen_text.contains("50%"));
+    }
+
+    #[test]
+    fn render_vt100_rows_incremental_chunks() {
+        let mut parser = vt100::Parser::new(u16::MAX, 80, 0);
+        let mut last_row = 0u16;
+        let mut buf = Vec::new();
+
+        render_vt100_rows(&mut buf, &mut parser, &mut last_row, 80, b"chunk1\n").unwrap();
+        render_vt100_rows(&mut buf, &mut parser, &mut last_row, 80, b"chunk2\n").unwrap();
+        render_vt100_rows(&mut buf, &mut parser, &mut last_row, 80, b"chunk3\n").unwrap();
+
+        let screen_text = parser.screen().contents();
+        assert!(screen_text.contains("chunk1"));
+        assert!(screen_text.contains("chunk2"));
+        assert!(screen_text.contains("chunk3"));
+    }
+
+    #[test]
+    fn render_vt100_rows_nul_filtered() {
+        let mut parser = vt100::Parser::new(u16::MAX, 80, 0);
+        let mut last_row = 0u16;
+        let mut buf = Vec::new();
+
+        render_vt100_rows(
+            &mut buf,
+            &mut parser,
+            &mut last_row,
+            80,
+            b"Hello\x00World\n",
+        )
+        .unwrap();
+        // Output should not contain NUL bytes
+        assert!(!buf.contains(&0u8));
     }
 }
