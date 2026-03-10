@@ -1,3 +1,5 @@
+use std::io::IsTerminal;
+
 use anyhow::Result;
 use chrono::{DateTime, Local};
 use colored::Colorize;
@@ -36,6 +38,24 @@ fn filter_log_lines(content: &str, grep: Option<&Regex>) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         None => content.to_string(),
+    }
+}
+
+/// Render raw log output through vt100 terminal emulation.
+/// Resolves cursor control sequences (e.g. Docker buildx progress) to final screen state.
+/// When `preserve_colors` is true, retains ANSI color codes (for terminal output).
+/// When false, returns plain text (for file/pipe/JSON).
+pub fn render_log(content: &str, preserve_colors: bool) -> String {
+    // Fast path: no escape sequences
+    if !content.as_bytes().contains(&0x1b) {
+        return content.to_string();
+    }
+    let mut parser = vt100::Parser::new(u16::MAX, 200, 0);
+    parser.process(content.as_bytes());
+    if preserve_colors {
+        String::from_utf8_lossy(&parser.screen().contents_formatted()).to_string()
+    } else {
+        parser.screen().contents()
     }
 }
 
@@ -79,7 +99,8 @@ fn build_job_log_json(
             }).collect::<Vec<_>>()
         }),
         "logs": logs.iter().map(|(name, content)| {
-            let filtered = filter_log_lines(content, grep);
+            let rendered = render_log(content, false);
+            let filtered = filter_log_lines(&rendered, grep);
             serde_json::json!({
                 "step": name,
                 "output": filtered,
@@ -133,12 +154,14 @@ pub fn print_job_log(
     }
 
     if !logs.is_empty() {
+        let is_tty = std::io::stdout().is_terminal();
         println!();
         for (step_name, content) in logs {
             if content.is_empty() {
                 continue;
             }
-            let filtered = filter_log_lines(content, grep);
+            let rendered = render_log(content, is_tty);
+            let filtered = filter_log_lines(&rendered, grep);
             if filtered.is_empty() {
                 continue;
             }
@@ -177,7 +200,9 @@ pub fn print_node_log(
     println!();
 
     if !log.is_empty() {
-        println!("{}", log);
+        let is_tty = std::io::stdout().is_terminal();
+        let rendered = render_log(log, is_tty);
+        println!("{}", rendered);
         println!();
     }
     Ok(())
@@ -457,6 +482,43 @@ mod tests {
         let re = Regex::new("error").unwrap();
         let content = "info: ok\ninfo: fine";
         assert_eq!(filter_log_lines(content, Some(&re)), "");
+    }
+
+    // --- render_log tests ---
+
+    #[test]
+    fn render_log_plain_text_unchanged() {
+        let input = "hello\nworld";
+        assert_eq!(render_log(input, false), input);
+    }
+
+    #[test]
+    fn render_log_strips_ansi_colors() {
+        let input = "\x1b[34mblue text\x1b[0m";
+        assert_eq!(render_log(input, false), "blue text");
+    }
+
+    #[test]
+    fn render_log_preserves_colors() {
+        let input = "\x1b[34mblue text\x1b[0m";
+        let result = render_log(input, true);
+        assert!(result.contains("blue text"));
+        assert!(result.contains("\x1b["));
+    }
+
+    #[test]
+    fn render_log_resolves_cursor_control() {
+        // Simulate Docker buildx-style progress: multiple lines, then cursor-up to overwrite
+        // \x1b[1A = cursor up 1, \x1b[2K = erase entire line, \x1b[0G = cursor to column 0
+        let input = "header\n\
+                      progress: 50%\n\
+                      \x1b[1A\x1b[2K\x1b[0Gprogress: 100%\n\
+                      done";
+        let result = render_log(input, false);
+        assert!(result.contains("header"));
+        assert!(result.contains("progress: 100%"));
+        assert!(!result.contains("progress: 50%"));
+        assert!(result.contains("done"));
     }
 
     // --- build_job_log_json tests ---

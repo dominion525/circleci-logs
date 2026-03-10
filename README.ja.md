@@ -324,6 +324,10 @@ chmod 600 .circleci-logs.toml
 echo '.circleci-logs.toml' >> .gitignore
 ```
 
+## ログレンダリング
+
+CircleCI のログ出力にはターミナルエスケープシーケンス（ANSI カラー、カーソル制御）が含まれています。本ツールは vt100 ターミナルエミュレータを通してこれを処理し、CircleCI Web UI と同等のクリーンな出力を生成します。ターミナルへの出力時は色を保持し、パイプやリダイレクト時はプレーンテキストを出力します。技術的な詳細は [docs/log-rendering.ja.md](docs/log-rendering.ja.md) を参照してください。
+
 ## AI エージェント連携
 
 Claude Code 等の AI エージェントのスキルとして登録できます：

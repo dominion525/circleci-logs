@@ -323,6 +323,10 @@ chmod 600 .circleci-logs.toml
 echo '.circleci-logs.toml' >> .gitignore
 ```
 
+## Log Rendering
+
+Log output from CircleCI contains terminal escape sequences (ANSI colors, cursor control). The CLI processes these through a vt100 terminal emulator to produce clean output — matching what the CircleCI Web UI displays. When writing to a terminal, colors are preserved; when piped or redirected, plain text is emitted. See [docs/log-rendering.md](docs/log-rendering.md) for technical details.
+
 ## AI Agent Integration
 
 Register as a skill for AI agents like Claude Code:
