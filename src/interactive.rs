@@ -1,4 +1,8 @@
+use std::io::Write;
+use std::time::Duration;
+
 use anyhow::Result;
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use dialoguer::Select;
 
 use crate::api::{CircleCiClient, LogSource};
@@ -455,31 +459,227 @@ async fn select_step(
             continue;
         };
 
-        match show_log(client, &detail, step, action, action_index).await? {
+        match show_log(client, &detail, step, action, action_index, step_index).await? {
             LogAction::Back => continue,
             LogAction::Exit => return Ok(State::Done),
         }
     }
 }
 
-async fn show_log(
+// --- Streaming helpers ---
+
+/// RAII guard for crossterm raw mode.
+///
+/// Entering raw mode disables line buffering and echo so we can poll for
+/// individual key presses.  The guard ensures `disable_raw_mode()` is called
+/// on all exit paths — including panics and early `?` returns — so the
+/// terminal is never left in an unusable state.
+struct RawModeGuard;
+
+impl RawModeGuard {
+    fn enable() -> Result<Self> {
+        crossterm::terminal::enable_raw_mode()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
+/// Whether the given action status represents a terminal (finished) state.
+///
+/// CircleCI uses these terminal states for completed actions.  Both "canceled"
+/// and "cancelled" appear in practice — the v1.1 API uses "canceled" while the
+/// v2 API uses "cancelled", so we accept both.
+fn is_step_finished(status: &str) -> bool {
+    matches!(
+        status,
+        "success"
+            | "failed"
+            | "canceled"
+            | "cancelled"
+            | "timedout"
+            | "infrastructure_fail"
+            | "not_run"
+    )
+}
+
+/// Look up the current status string for a specific action within a job.
+///
+/// `step_index` is the positional index into `detail.steps[]` (the step array),
+/// while `node_index` selects the action within that step's `actions[]` array.
+/// In parallelism > 1 jobs each parallel node is a separate action under the
+/// same step, so `node_index` corresponds to the parallel container number.
+fn find_action_status(detail: &JobDetail, step_index: usize, node_index: usize) -> Option<String> {
+    detail
+        .steps
+        .as_ref()
+        .and_then(|steps| steps.get(step_index))
+        .and_then(|step| step.actions.get(node_index))
+        .map(|action| action.status.clone())
+}
+
+/// Write raw bytes to the terminal, converting lone LF (`\n`) to CRLF (`\r\n`).
+///
+/// In raw mode the terminal driver does not perform automatic newline
+/// translation, so a bare `\n` moves the cursor down without returning to
+/// column 0, producing staircase output.  This function adds `\r` before
+/// every `\n` to restore normal line-break behavior.
+///
+/// This byte-level replacement is safe even when `data` contains ANSI escape
+/// sequences: no standard escape sequence uses `0x0A` (LF) as a parameter
+/// byte, so replacing it never corrupts an escape sequence.
+fn write_with_crlf(w: &mut impl Write, data: &[u8]) -> std::io::Result<()> {
+    for &byte in data {
+        if byte == b'\n' {
+            w.write_all(b"\r\n")?;
+        } else {
+            w.write_all(&[byte])?;
+        }
+    }
+    w.flush()
+}
+
+/// Stream a running step's log output in real time.
+///
+/// Enters crossterm raw mode to capture individual key presses, then runs a
+/// polling loop that alternates between checking for user input and fetching
+/// new log bytes from the CircleCI private API.
+///
+/// ## Polling loop timing
+///
+/// Each iteration:
+/// 1. `event::poll(50ms)` — check for key presses.  50 ms is below the
+///    human-perceptible latency threshold (~100 ms), so key presses feel
+///    instant while keeping CPU usage negligible.
+/// 2. `fetch_private_output_range` — incremental log fetch.
+/// 3. `tokio::time::sleep(950ms)` — wait before next iteration.
+///    Together with the 50 ms poll this gives ~1 second per cycle, balancing
+///    real-time feel against API load.
+/// 4. Every 5 polls (~5 seconds) the job detail is re-fetched to check
+///    whether the step has finished.  5 seconds is short enough that the
+///    user rarely waits long after completion.
+///
+/// ## Error handling
+///
+/// Transient fetch errors trigger adaptive backoff (950 ms → 3 s → 5 s).
+/// After 3 consecutive errors the stream stops with a message rather than
+/// spinning indefinitely.
+#[allow(clippy::too_many_arguments)]
+async fn stream_log(
     client: &CircleCiClient,
     detail: &JobDetail,
     step: &Step,
-    action: &Action,
+    _action: &Action,
     node_index: usize,
+    step_index: usize,
+    step_id: u32,
+    task_index: u32,
 ) -> Result<LogAction> {
+    // Print header in normal mode
+    crate::output::print_node_header(detail, step, node_index, "streaming...");
+    println!("  Press Esc or q to stop streaming\n");
+
+    let _guard = RawModeGuard::enable()?;
+    let mut stdout = std::io::stdout();
+
     let job_number = detail.build_num.unwrap_or(0);
-    let log = match LogSource::from_action(action, job_number) {
-        Some(source) => match client.fetch_log(&source).await {
-            Ok(content) => content,
-            Err(e) => format!("(failed to fetch log: {})", e),
-        },
-        None => String::new(),
-    };
+    let mut byte_offset: u64 = 0;
+    let mut polls_since_status_check: u32 = 0;
+    let mut consecutive_errors: u32 = 0;
+    let mut poll_interval_ms: u64 = 950;
 
-    crate::output::print_node_log(detail, step, action, node_index, &log)?;
+    loop {
+        // Non-blocking key input check (50ms — below human-perceptible latency)
+        if event::poll(Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        write!(stdout, "\r\n")?;
+                        stdout.flush()?;
+                        drop(_guard);
+                        return show_post_log_menu();
+                    }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        write!(stdout, "\r\n")?;
+                        stdout.flush()?;
+                        return Ok(LogAction::Exit);
+                    }
+                    _ => {}
+                }
+            }
+        }
 
+        // Incremental fetch
+        match client
+            .fetch_private_output_range(job_number, task_index, step_id, byte_offset)
+            .await
+        {
+            Ok(chunk) => {
+                consecutive_errors = 0;
+                poll_interval_ms = 950; // reset backoff
+                if !chunk.data.is_empty() {
+                    write_with_crlf(&mut stdout, &chunk.data)?;
+                    byte_offset = chunk.new_offset;
+                }
+            }
+            Err(_) => {
+                consecutive_errors += 1;
+                // Adaptive backoff for errors
+                poll_interval_ms = if poll_interval_ms <= 950 { 3000 } else { 5000 };
+                if consecutive_errors >= 3 {
+                    write!(
+                        stdout,
+                        "\r\n--- Streaming stopped (connection error) ---\r\n"
+                    )?;
+                    stdout.flush()?;
+                    break;
+                }
+            }
+        }
+
+        // Step completion check (~every 5 polls)
+        polls_since_status_check += 1;
+        if polls_since_status_check >= 5 {
+            polls_since_status_check = 0;
+            if let Ok(refreshed) = client.fetch_job_detail(job_number).await {
+                if let Some(status) = find_action_status(&refreshed, step_index, node_index) {
+                    if is_step_finished(&status) {
+                        // Final fetch to catch any remaining output
+                        if let Ok(final_chunk) = client
+                            .fetch_private_output_range(
+                                job_number,
+                                task_index,
+                                step_id,
+                                byte_offset,
+                            )
+                            .await
+                        {
+                            if !final_chunk.data.is_empty() {
+                                write_with_crlf(&mut stdout, &final_chunk.data)?;
+                            }
+                        }
+                        write!(stdout, "\r\n--- {} [{}] ---\r\n", step.name, status)?;
+                        stdout.flush()?;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Wait until next poll
+        tokio::time::sleep(Duration::from_millis(poll_interval_ms)).await;
+    }
+
+    // Drop guard before showing menu
+    drop(_guard);
+    show_post_log_menu()
+}
+
+fn show_post_log_menu() -> Result<LogAction> {
     let selection = Select::new()
         .with_prompt("Log view")
         .items(&["Back to steps", "Exit"])
@@ -491,6 +691,39 @@ async fn show_log(
         Some(0) => Ok(LogAction::Back),
         _ => Ok(LogAction::Exit),
     }
+}
+
+async fn show_log(
+    client: &CircleCiClient,
+    detail: &JobDetail,
+    step: &Step,
+    action: &Action,
+    node_index: usize,
+    step_index: usize,
+) -> Result<LogAction> {
+    // Streaming mode for running steps with private API available
+    if action.status == "running" {
+        if let (Some(step_id), Some(task_index)) = (action.step, action.index) {
+            return stream_log(
+                client, detail, step, action, node_index, step_index, step_id, task_index,
+            )
+            .await;
+        }
+    }
+
+    // Existing logic for completed steps or when streaming is unavailable
+    let job_number = detail.build_num.unwrap_or(0);
+    let log = match LogSource::from_action(action, job_number) {
+        Some(source) => match client.fetch_log(&source).await {
+            Ok(content) => content,
+            Err(e) => format!("(failed to fetch log: {})", e),
+        },
+        None => String::new(),
+    };
+
+    crate::output::print_node_log(detail, step, action, node_index, &log)?;
+
+    show_post_log_menu()
 }
 
 // --- Aggregate helpers ---
@@ -1225,5 +1458,133 @@ mod tests {
         let result = format_node_item(&steps, 1);
         assert!(result.contains("failed"));
         assert!(result.contains("28s"));
+    }
+
+    // --- is_step_finished tests ---
+
+    #[test]
+    fn is_step_finished_success() {
+        assert!(is_step_finished("success"));
+    }
+
+    #[test]
+    fn is_step_finished_failed() {
+        assert!(is_step_finished("failed"));
+    }
+
+    #[test]
+    fn is_step_finished_canceled() {
+        assert!(is_step_finished("canceled"));
+        assert!(is_step_finished("cancelled"));
+    }
+
+    #[test]
+    fn is_step_finished_timedout() {
+        assert!(is_step_finished("timedout"));
+    }
+
+    #[test]
+    fn is_step_finished_infrastructure_fail() {
+        assert!(is_step_finished("infrastructure_fail"));
+    }
+
+    #[test]
+    fn is_step_finished_not_run() {
+        assert!(is_step_finished("not_run"));
+    }
+
+    #[test]
+    fn is_step_finished_running() {
+        assert!(!is_step_finished("running"));
+    }
+
+    #[test]
+    fn is_step_finished_queued() {
+        assert!(!is_step_finished("queued"));
+    }
+
+    // --- find_action_status tests ---
+
+    #[test]
+    fn find_action_status_found() {
+        let detail = JobDetail {
+            steps: Some(vec![
+                make_step_with_actions("s0", vec![make_action("a0", "success", None)]),
+                make_step_with_actions(
+                    "s1",
+                    vec![
+                        make_action("a0", "running", None),
+                        make_action("a1", "failed", None),
+                    ],
+                ),
+            ]),
+            status: None,
+            build_num: None,
+            workflows: None,
+        };
+        assert_eq!(
+            find_action_status(&detail, 1, 0),
+            Some("running".to_string())
+        );
+        assert_eq!(
+            find_action_status(&detail, 1, 1),
+            Some("failed".to_string())
+        );
+    }
+
+    #[test]
+    fn find_action_status_step_out_of_range() {
+        let detail = JobDetail {
+            steps: Some(vec![make_step_with_actions(
+                "s0",
+                vec![make_action("a0", "success", None)],
+            )]),
+            status: None,
+            build_num: None,
+            workflows: None,
+        };
+        assert_eq!(find_action_status(&detail, 5, 0), None);
+    }
+
+    #[test]
+    fn find_action_status_steps_none() {
+        let detail = JobDetail {
+            steps: None,
+            status: None,
+            build_num: None,
+            workflows: None,
+        };
+        assert_eq!(find_action_status(&detail, 0, 0), None);
+    }
+
+    // --- write_with_crlf tests ---
+
+    #[test]
+    fn write_with_crlf_converts_newlines() {
+        let mut buf = Vec::new();
+        write_with_crlf(&mut buf, b"hello\nworld\n").unwrap();
+        assert_eq!(buf, b"hello\r\nworld\r\n");
+    }
+
+    #[test]
+    fn write_with_crlf_no_newlines() {
+        let mut buf = Vec::new();
+        write_with_crlf(&mut buf, b"hello world").unwrap();
+        assert_eq!(buf, b"hello world");
+    }
+
+    #[test]
+    fn write_with_crlf_empty() {
+        let mut buf = Vec::new();
+        write_with_crlf(&mut buf, b"").unwrap();
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn write_with_crlf_binary_data_passthrough() {
+        let mut buf = Vec::new();
+        let data = [0x00, 0x01, 0xFF, 0x0A, 0x42]; // 0x0A = \n
+        write_with_crlf(&mut buf, &data).unwrap();
+        assert_eq!(buf, [0x00, 0x01, 0xFF, 0x0D, 0x0A, 0x42]);
     }
 }

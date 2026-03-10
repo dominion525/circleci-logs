@@ -176,6 +176,27 @@ pub fn print_job_log(
     Ok(())
 }
 
+/// Print the header block shown above log output for a single step/node.
+///
+/// Used by both `stream_log` (live streaming) and `print_node_log` (static
+/// log display) to provide a consistent header format: workflow name, job
+/// name, node index, step name, and status.
+pub fn print_node_header(detail: &JobDetail, step: &Step, node_index: usize, status_label: &str) {
+    if let Some(ref wf) = detail.workflows {
+        if let Some(ref wf_name) = wf.workflow_name {
+            print!("Workflow: {}  ", wf_name);
+        }
+        if let Some(ref job_name) = wf.job_name {
+            print!("Job: {}  ", job_name);
+        }
+        println!();
+    }
+
+    println!("Node: {}  Step: {}", node_index, step.name.bold());
+    println!("  [{}]", colorize_status(status_label));
+    println!();
+}
+
 pub fn print_node_log(
     detail: &JobDetail,
     step: &Step,
