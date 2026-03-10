@@ -1,6 +1,8 @@
 target/
 .circleci-logs.toml
-
+tasks/
+CLAUDE.md
+.claude/
 
 # Added by cargo
 

@@ -24,6 +24,7 @@ colored = "2"
 chrono = { version = "0.4", features = ["clock"] }
 dialoguer = "0.11"
 futures-util = "0.3"
+vt100 = "0.16"
 
 [dev-dependencies]
 wiremock = "0.6"
