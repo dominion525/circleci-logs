@@ -284,39 +284,44 @@ async fn select_job(
         }
 
         let job = &items[selection - 1];
-        if let Some(job_number) = job.job_number {
-            let detail = client.fetch_job_detail(job_number).await?;
-            let steps = match detail.steps {
-                Some(ref s) if !s.is_empty() => s,
-                _ => {
-                    println!("No steps found for this job.");
-                    continue;
-                }
-            };
-
-            // Parallel job: any step has >1 actions
-            if steps.first().is_some_and(|s| s.actions.len() > 1) {
-                return Ok(State::Nodes {
-                    job_number,
-                    detail,
-                    workflow_id: workflow_id.to_string(),
-                    pipeline_number,
-                    pipeline_id: pipeline_id.to_string(),
-                });
-            } else {
-                return Ok(State::Steps {
-                    job_number,
-                    detail,
-                    node_index: None,
-                    workflow_id: workflow_id.to_string(),
-                    pipeline_number,
-                    pipeline_id: pipeline_id.to_string(),
-                });
-            }
-        } else {
+        let Some(job_number) = job.job_number else {
             println!("This job has no job number (may be pending or blocked).");
+            continue;
+        };
+        let detail = match client.fetch_job_detail(job_number).await {
+            Ok(d) => d,
+            Err(e) => {
+                println!("Could not fetch job detail: {}", e);
+                continue;
+            }
+        };
+        let steps = match detail.steps {
+            Some(ref s) if !s.is_empty() => s,
+            _ => {
+                println!("No steps found for this job.");
+                continue;
+            }
+        };
+
+        // Parallel job: any step has >1 actions
+        if steps.first().is_some_and(|s| s.actions.len() > 1) {
+            return Ok(State::Nodes {
+                job_number,
+                detail,
+                workflow_id: workflow_id.to_string(),
+                pipeline_number,
+                pipeline_id: pipeline_id.to_string(),
+            });
+        } else {
+            return Ok(State::Steps {
+                job_number,
+                detail,
+                node_index: None,
+                workflow_id: workflow_id.to_string(),
+                pipeline_number,
+                pipeline_id: pipeline_id.to_string(),
+            });
         }
-        continue;
     }
 }
 
