@@ -517,20 +517,11 @@ impl Drop for RawModeGuard {
 
 /// Whether the given action status represents a terminal (finished) state.
 ///
-/// CircleCI uses these terminal states for completed actions.  Both "canceled"
-/// and "cancelled" appear in practice — the v1.1 API uses "canceled" while the
-/// v2 API uses "cancelled", so we accept both.
+/// Uses a positive-list approach: only "running" and "queued" are considered
+/// non-terminal.  Any other status (including unknown future values from the
+/// CircleCI API) is treated as finished, preventing indefinite streaming.
 fn is_step_finished(status: &str) -> bool {
-    matches!(
-        status,
-        "success"
-            | "failed"
-            | "canceled"
-            | "cancelled"
-            | "timedout"
-            | "infrastructure_fail"
-            | "not_run"
-    )
+    !matches!(status, "running" | "queued")
 }
 
 /// Look up the current status string for a specific action within a job.
@@ -1590,6 +1581,14 @@ mod tests {
     #[test]
     fn is_step_finished_queued() {
         assert!(!is_step_finished("queued"));
+    }
+
+    #[test]
+    fn is_step_finished_unknown_status() {
+        // Unknown/future status values should be treated as finished
+        assert!(is_step_finished("some_new_status"));
+        assert!(is_step_finished(""));
+        assert!(is_step_finished("blocked"));
     }
 
     // --- find_action_status tests ---
