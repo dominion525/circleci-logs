@@ -59,6 +59,41 @@ pub fn render_log(content: &str, preserve_colors: bool) -> String {
     }
 }
 
+/// Compute elapsed time in milliseconds for an action.
+/// Prefers `run_time_millis` (set by API for completed actions).
+/// For running actions (no `run_time_millis`), computes from `start_time` to now.
+pub fn compute_elapsed_millis(action: &Action) -> Option<u64> {
+    if let Some(ms) = action.run_time_millis {
+        return Some(ms);
+    }
+    if let Some(ref start) = action.start_time {
+        if action.end_time.is_none() {
+            if let Ok(dt) = DateTime::parse_from_rfc3339(start) {
+                let elapsed = chrono::Utc::now().signed_duration_since(dt);
+                if elapsed.num_milliseconds() > 0 {
+                    return Some(elapsed.num_milliseconds() as u64);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Format elapsed time with "~" prefix to indicate approximate/in-progress value.
+pub fn format_elapsed(millis: Option<u64>) -> String {
+    match millis {
+        Some(ms) => {
+            let secs = ms / 1000;
+            if secs >= 60 {
+                format!("~{}m{}s", secs / 60, secs % 60)
+            } else {
+                format!("~{}s", secs)
+            }
+        }
+        None => "-".to_string(),
+    }
+}
+
 pub fn format_duration(millis: Option<u64>) -> String {
     match millis {
         Some(ms) => {
@@ -575,6 +610,8 @@ mod tests {
             output_url: None,
             step: None,
             index: None,
+            start_time: None,
+            end_time: None,
         }
     }
 
@@ -612,6 +649,8 @@ mod tests {
             step: Some(101),
             index: Some(0),
             output_url: Some("https://example.com/output".to_string()),
+            start_time: None,
+            end_time: None,
         };
         let detail = make_detail(
             Some(vec![make_step("build", vec![action])]),
@@ -941,5 +980,87 @@ mod tests {
         let action = &step.actions[0];
         let result = print_node_log(&detail, step, action, 0, "log content");
         assert!(result.is_ok());
+    }
+
+    // --- compute_elapsed_millis tests ---
+
+    #[test]
+    fn compute_elapsed_prefers_run_time_millis() {
+        let action = Action {
+            name: "test".to_string(),
+            status: "success".to_string(),
+            run_time_millis: Some(5000),
+            output_url: None,
+            step: None,
+            index: None,
+            start_time: Some("2020-01-01T00:00:00Z".to_string()),
+            end_time: None,
+        };
+        assert_eq!(compute_elapsed_millis(&action), Some(5000));
+    }
+
+    #[test]
+    fn compute_elapsed_from_start_time() {
+        let recent = chrono::Utc::now() - chrono::Duration::seconds(30);
+        let action = Action {
+            name: "test".to_string(),
+            status: "running".to_string(),
+            run_time_millis: None,
+            output_url: None,
+            step: None,
+            index: None,
+            start_time: Some(recent.to_rfc3339()),
+            end_time: None,
+        };
+        let ms = compute_elapsed_millis(&action).unwrap();
+        // Should be approximately 30 seconds (allow 5s tolerance)
+        assert!(ms >= 25_000 && ms <= 35_000, "elapsed was {}ms", ms);
+    }
+
+    #[test]
+    fn compute_elapsed_none_when_no_data() {
+        let action = Action {
+            name: "test".to_string(),
+            status: "running".to_string(),
+            run_time_millis: None,
+            output_url: None,
+            step: None,
+            index: None,
+            start_time: None,
+            end_time: None,
+        };
+        assert_eq!(compute_elapsed_millis(&action), None);
+    }
+
+    #[test]
+    fn compute_elapsed_none_when_ended() {
+        let action = Action {
+            name: "test".to_string(),
+            status: "success".to_string(),
+            run_time_millis: None,
+            output_url: None,
+            step: None,
+            index: None,
+            start_time: Some("2020-01-01T00:00:00Z".to_string()),
+            end_time: Some("2020-01-01T00:01:00Z".to_string()),
+        };
+        assert_eq!(compute_elapsed_millis(&action), None);
+    }
+
+    // --- format_elapsed tests ---
+
+    #[test]
+    fn format_elapsed_seconds() {
+        assert_eq!(format_elapsed(Some(5000)), "~5s");
+    }
+
+    #[test]
+    fn format_elapsed_minutes() {
+        assert_eq!(format_elapsed(Some(125000)), "~2m5s");
+    }
+
+    #[test]
+    fn format_elapsed_none() {
+        assert_eq!(format_elapsed(None), "-");
     }
 }

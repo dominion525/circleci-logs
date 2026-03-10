@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -543,6 +543,40 @@ fn write_with_crlf(w: &mut impl Write, data: &[u8]) -> std::io::Result<()> {
     w.flush()
 }
 
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// Clear the in-place status indicator from the current line.
+fn clear_status_line(w: &mut impl Write) -> std::io::Result<()> {
+    write!(w, "\r\x1b[K")?;
+    w.flush()
+}
+
+/// Write the streaming status indicator on the current line (dim color).
+fn write_status_line(
+    w: &mut impl Write,
+    elapsed: Duration,
+    total_bytes: u64,
+    waiting: bool,
+) -> std::io::Result<()> {
+    let secs = elapsed.as_secs();
+    let size = format_bytes(total_bytes);
+    let indicator = if waiting { " waiting..." } else { "" };
+    write!(
+        w,
+        "\r\x1b[K\x1b[2m[{}s | {} received{}]\x1b[0m",
+        secs, size, indicator
+    )?;
+    w.flush()
+}
+
 /// Stream a running step's log output in real time.
 ///
 /// Enters crossterm raw mode to capture individual key presses, then runs a
@@ -591,6 +625,9 @@ async fn stream_log(
     let mut polls_since_status_check: u32 = 0;
     let mut consecutive_errors: u32 = 0;
     let mut poll_interval_ms: u64 = 950;
+    let stream_start = Instant::now();
+    let mut total_bytes: u64 = 0;
+    let mut status_line_visible = false;
 
     loop {
         // Non-blocking key input check (50ms — below human-perceptible latency)
@@ -598,12 +635,18 @@ async fn stream_log(
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => {
+                        if status_line_visible {
+                            clear_status_line(&mut stdout)?;
+                        }
                         write!(stdout, "\r\n")?;
                         stdout.flush()?;
                         drop(_guard);
                         return show_post_log_menu();
                     }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if status_line_visible {
+                            clear_status_line(&mut stdout)?;
+                        }
                         write!(stdout, "\r\n")?;
                         stdout.flush()?;
                         return Ok(LogAction::Exit);
@@ -622,15 +665,27 @@ async fn stream_log(
                 consecutive_errors = 0;
                 poll_interval_ms = 950; // reset backoff
                 if !chunk.data.is_empty() {
+                    if status_line_visible {
+                        clear_status_line(&mut stdout)?;
+                    }
+                    total_bytes += chunk.data.len() as u64;
                     write_with_crlf(&mut stdout, &chunk.data)?;
                     byte_offset = chunk.new_offset;
                 }
+                // Show/update the status indicator
+                let elapsed = stream_start.elapsed();
+                let waiting = chunk.data.is_empty();
+                write_status_line(&mut stdout, elapsed, total_bytes, waiting)?;
+                status_line_visible = true;
             }
             Err(_) => {
                 consecutive_errors += 1;
                 // Adaptive backoff for errors
                 poll_interval_ms = if poll_interval_ms <= 950 { 3000 } else { 5000 };
                 if consecutive_errors >= 3 {
+                    if status_line_visible {
+                        clear_status_line(&mut stdout)?;
+                    }
                     write!(
                         stdout,
                         "\r\n--- Streaming stopped (connection error) ---\r\n"
@@ -638,6 +693,10 @@ async fn stream_log(
                     stdout.flush()?;
                     break;
                 }
+                // Show status with waiting indication during errors
+                let elapsed = stream_start.elapsed();
+                write_status_line(&mut stdout, elapsed, total_bytes, true)?;
+                status_line_visible = true;
             }
         }
 
@@ -648,6 +707,9 @@ async fn stream_log(
             if let Ok(refreshed) = client.fetch_job_detail(job_number).await {
                 if let Some(status) = find_action_status(&refreshed, step_index, node_index) {
                     if is_step_finished(&status) {
+                        if status_line_visible {
+                            clear_status_line(&mut stdout)?;
+                        }
                         // Final fetch to catch any remaining output
                         if let Ok(final_chunk) = client
                             .fetch_private_output_range(
@@ -750,9 +812,8 @@ fn aggregate_node_duration(steps: &[Step], node_index: usize) -> Option<u64> {
     let mut sum: u64 = 0;
     let mut any = false;
     for step in steps {
-        #[allow(clippy::collapsible_if)]
         if let Some(action) = step.actions.get(node_index) {
-            if let Some(ms) = action.run_time_millis {
+            if let Some(ms) = crate::output::compute_elapsed_millis(action) {
                 sum += ms;
                 any = true;
             }
@@ -765,7 +826,12 @@ fn aggregate_node_duration(steps: &[Step], node_index: usize) -> Option<u64> {
 
 fn format_node_item(steps: &[Step], node_index: usize) -> String {
     let status = aggregate_node_status(steps, node_index);
-    let duration = crate::output::format_duration(aggregate_node_duration(steps, node_index));
+    let millis = aggregate_node_duration(steps, node_index);
+    let duration = if status == "running" {
+        crate::output::format_elapsed(millis)
+    } else {
+        crate::output::format_duration(millis)
+    };
     format!(
         "node {:<4} [{}] {}",
         node_index,
@@ -778,7 +844,12 @@ fn format_step_item_for_node(step: &Step, node_index: usize) -> String {
     let Some(action) = step.actions.get(node_index) else {
         return format!("[{:<7}] {:<40} -", "-", step.name);
     };
-    let duration = crate::output::format_duration(action.run_time_millis);
+    let millis = crate::output::compute_elapsed_millis(action);
+    let duration = if action.status == "running" {
+        crate::output::format_elapsed(millis)
+    } else {
+        crate::output::format_duration(millis)
+    };
     format!(
         "[{}] {:<40} {}",
         colorize_status_padded(&action.status, 7),
@@ -791,7 +862,12 @@ fn format_step_item(step: &Step) -> String {
     let Some(action) = step.actions.first() else {
         return format!("[{:<7}] {:<40} -", "-", step.name);
     };
-    let duration = crate::output::format_duration(action.run_time_millis);
+    let millis = crate::output::compute_elapsed_millis(action);
+    let duration = if action.status == "running" {
+        crate::output::format_elapsed(millis)
+    } else {
+        crate::output::format_duration(millis)
+    };
     format!(
         "[{}] {:<40} {}",
         colorize_status_padded(&action.status, 7),
@@ -999,6 +1075,8 @@ mod tests {
             output_url: None,
             step: None,
             index: None,
+            start_time: None,
+            end_time: None,
         }
     }
 
@@ -1586,5 +1664,54 @@ mod tests {
         let data = [0x00, 0x01, 0xFF, 0x0A, 0x42]; // 0x0A = \n
         write_with_crlf(&mut buf, &data).unwrap();
         assert_eq!(buf, [0x00, 0x01, 0xFF, 0x0D, 0x0A, 0x42]);
+    }
+
+    // --- format_bytes tests ---
+
+    #[test]
+    fn format_bytes_small() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+    }
+
+    #[test]
+    fn format_bytes_kilobytes() {
+        assert_eq!(format_bytes(1024), "1.0 KB");
+        assert_eq!(format_bytes(4300), "4.2 KB");
+    }
+
+    #[test]
+    fn format_bytes_megabytes() {
+        assert_eq!(format_bytes(1048576), "1.0 MB");
+        assert_eq!(format_bytes(2621440), "2.5 MB");
+    }
+
+    // --- clear_status_line / write_status_line tests ---
+
+    #[test]
+    fn clear_status_line_output() {
+        let mut buf = Vec::new();
+        clear_status_line(&mut buf).unwrap();
+        assert_eq!(buf, b"\r\x1b[K");
+    }
+
+    #[test]
+    fn write_status_line_normal() {
+        let mut buf = Vec::new();
+        write_status_line(&mut buf, Duration::from_secs(5), 4300, false).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("5s"));
+        assert!(s.contains("4.2 KB"));
+        assert!(!s.contains("waiting"));
+    }
+
+    #[test]
+    fn write_status_line_waiting() {
+        let mut buf = Vec::new();
+        write_status_line(&mut buf, Duration::from_secs(10), 0, true).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("10s"));
+        assert!(s.contains("waiting"));
     }
 }

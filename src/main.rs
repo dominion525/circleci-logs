@@ -444,6 +444,8 @@ mod tests {
             output_url: output_url.map(|s| s.to_string()),
             step: None,
             index: None,
+            start_time: None,
+            end_time: None,
         }
     }
 
