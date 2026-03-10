@@ -973,10 +973,9 @@ mod tests {
         let output_url = format!("{}/output-url", server.uri());
         Mock::given(method("GET"))
             .and(path("/output-url"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!([{"message": "from output_url\n", "type": "out"}])),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!([{"message": "from output_url\n", "type": "out"}]),
+            ))
             .expect(1)
             .mount(&server)
             .await;
