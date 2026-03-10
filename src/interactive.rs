@@ -389,29 +389,29 @@ async fn select_node(
 async fn select_step(
     client: &CircleCiClient,
     job_number: u64,
-    detail: JobDetail,
+    mut detail: JobDetail,
     node_index: Option<usize>,
     workflow_id: &str,
     pipeline_number: u64,
     pipeline_id: &str,
 ) -> Result<State> {
-    let steps = match detail.steps {
-        Some(ref s) => s,
-        None => {
-            return Ok(State::Jobs {
-                workflow_id: workflow_id.to_string(),
-                pipeline_number,
-                pipeline_id: pipeline_id.to_string(),
-            });
-        }
-    };
-
     let back_label = match node_index {
         Some(_) => ".. (back to nodes)",
         None => ".. (back to jobs)",
     };
 
     loop {
+        let steps = match detail.steps {
+            Some(ref s) => s,
+            None => {
+                return Ok(State::Jobs {
+                    workflow_id: workflow_id.to_string(),
+                    pipeline_number,
+                    pipeline_id: pipeline_id.to_string(),
+                });
+            }
+        };
+
         let mut labels: Vec<String> = vec![back_label.to_string()];
         match node_index {
             Some(ni) => {
@@ -453,14 +453,35 @@ async fn select_step(
         }
 
         let step_index = selection - 1;
-        let step = &steps[step_index];
         let action_index = node_index.unwrap_or(0);
-        let Some(action) = step.actions.get(action_index) else {
-            continue;
+
+        // Borrow steps temporarily to extract what we need for show_log
+        let (step_clone, action_clone) = {
+            let steps = detail.steps.as_ref().unwrap();
+            let step = &steps[step_index];
+            let Some(action) = step.actions.get(action_index) else {
+                continue;
+            };
+            (step.clone(), action.clone())
         };
 
-        match show_log(client, &detail, step, action, action_index, step_index).await? {
-            LogAction::Back => continue,
+        match show_log(
+            client,
+            &detail,
+            &step_clone,
+            &action_clone,
+            action_index,
+            step_index,
+        )
+        .await?
+        {
+            LogAction::Back => {
+                // Re-fetch job detail to get updated statuses and durations
+                if let Ok(refreshed) = client.fetch_job_detail(job_number).await {
+                    detail = refreshed;
+                }
+                continue;
+            }
             LogAction::Exit => return Ok(State::Done),
         }
     }
@@ -826,12 +847,7 @@ fn aggregate_node_duration(steps: &[Step], node_index: usize) -> Option<u64> {
 
 fn format_node_item(steps: &[Step], node_index: usize) -> String {
     let status = aggregate_node_status(steps, node_index);
-    let millis = aggregate_node_duration(steps, node_index);
-    let duration = if status == "running" {
-        crate::output::format_elapsed(millis)
-    } else {
-        crate::output::format_duration(millis)
-    };
+    let duration = crate::output::format_duration(aggregate_node_duration(steps, node_index));
     format!(
         "node {:<4} [{}] {}",
         node_index,
@@ -844,12 +860,7 @@ fn format_step_item_for_node(step: &Step, node_index: usize) -> String {
     let Some(action) = step.actions.get(node_index) else {
         return format!("[{:<7}] {:<40} -", "-", step.name);
     };
-    let millis = crate::output::compute_elapsed_millis(action);
-    let duration = if action.status == "running" {
-        crate::output::format_elapsed(millis)
-    } else {
-        crate::output::format_duration(millis)
-    };
+    let duration = crate::output::format_duration(crate::output::compute_elapsed_millis(action));
     format!(
         "[{}] {:<40} {}",
         colorize_status_padded(&action.status, 7),
@@ -862,12 +873,7 @@ fn format_step_item(step: &Step) -> String {
     let Some(action) = step.actions.first() else {
         return format!("[{:<7}] {:<40} -", "-", step.name);
     };
-    let millis = crate::output::compute_elapsed_millis(action);
-    let duration = if action.status == "running" {
-        crate::output::format_elapsed(millis)
-    } else {
-        crate::output::format_duration(millis)
-    };
+    let duration = crate::output::format_duration(crate::output::compute_elapsed_millis(action));
     format!(
         "[{}] {:<40} {}",
         colorize_status_padded(&action.status, 7),

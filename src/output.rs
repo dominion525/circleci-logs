@@ -80,20 +80,6 @@ pub fn compute_elapsed_millis(action: &Action) -> Option<u64> {
 }
 
 /// Format elapsed time with "~" prefix to indicate approximate/in-progress value.
-pub fn format_elapsed(millis: Option<u64>) -> String {
-    match millis {
-        Some(ms) => {
-            let secs = ms / 1000;
-            if secs >= 60 {
-                format!("~{}m{}s", secs / 60, secs % 60)
-            } else {
-                format!("~{}s", secs)
-            }
-        }
-        None => "-".to_string(),
-    }
-}
-
 pub fn format_duration(millis: Option<u64>) -> String {
     match millis {
         Some(ms) => {
@@ -1045,22 +1031,5 @@ mod tests {
             end_time: Some("2020-01-01T00:01:00Z".to_string()),
         };
         assert_eq!(compute_elapsed_millis(&action), None);
-    }
-
-    // --- format_elapsed tests ---
-
-    #[test]
-    fn format_elapsed_seconds() {
-        assert_eq!(format_elapsed(Some(5000)), "~5s");
-    }
-
-    #[test]
-    fn format_elapsed_minutes() {
-        assert_eq!(format_elapsed(Some(125000)), "~2m5s");
-    }
-
-    #[test]
-    fn format_elapsed_none() {
-        assert_eq!(format_elapsed(None), "-");
     }
 }
