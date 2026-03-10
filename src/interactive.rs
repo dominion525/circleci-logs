@@ -482,8 +482,11 @@ async fn select_step(
         {
             LogAction::Back => {
                 // Re-fetch job detail to get updated statuses and durations
-                if let Ok(refreshed) = client.fetch_job_detail(job_number).await {
-                    detail = refreshed;
+                match client.fetch_job_detail(job_number).await {
+                    Ok(refreshed) => detail = refreshed,
+                    Err(e) => {
+                        eprintln!("Warning: could not refresh job detail: {e}");
+                    }
                 }
                 continue;
             }
@@ -640,7 +643,7 @@ async fn stream_log(
     let job_number = detail.build_num.unwrap_or(0);
     let mut byte_offset: u64 = 0;
     let mut polls_since_status_check: u32 = 0;
-    let mut consecutive_errors: u32 = 0;
+    let mut first_error_at: Option<Instant> = None;
     let mut poll_interval_ms: u64 = 950;
     let stream_start = Instant::now();
     let mut total_bytes: u64 = 0;
@@ -679,7 +682,7 @@ async fn stream_log(
             .await
         {
             Ok(chunk) => {
-                consecutive_errors = 0;
+                first_error_at = None;
                 poll_interval_ms = 950; // reset backoff
                 if !chunk.data.is_empty() {
                     if status_line_visible {
@@ -696,10 +699,10 @@ async fn stream_log(
                 status_line_visible = true;
             }
             Err(_) => {
-                consecutive_errors += 1;
+                let error_start = *first_error_at.get_or_insert_with(Instant::now);
                 // Adaptive backoff for errors
                 poll_interval_ms = if poll_interval_ms <= 950 { 3000 } else { 5000 };
-                if consecutive_errors >= 3 {
+                if error_start.elapsed() >= Duration::from_secs(30) {
                     if status_line_visible {
                         clear_status_line(&mut stdout)?;
                     }
@@ -721,30 +724,41 @@ async fn stream_log(
         polls_since_status_check += 1;
         if polls_since_status_check >= 5 {
             polls_since_status_check = 0;
-            if let Ok(refreshed) = client.fetch_job_detail(job_number).await {
-                if let Some(status) = find_action_status(&refreshed, step_index, node_index) {
-                    if is_step_finished(&status) {
-                        if status_line_visible {
-                            clear_status_line(&mut stdout)?;
-                        }
-                        // Final fetch to catch any remaining output
-                        if let Ok(final_chunk) = client
-                            .fetch_private_output_range(
-                                job_number,
-                                task_index,
-                                step_id,
-                                byte_offset,
-                            )
-                            .await
-                        {
-                            if !final_chunk.data.is_empty() {
-                                write_with_crlf(&mut stdout, &final_chunk.data)?;
+            match client.fetch_job_detail(job_number).await {
+                Ok(refreshed) => {
+                    if let Some(status) =
+                        find_action_status(&refreshed, step_index, node_index)
+                    {
+                        if is_step_finished(&status) {
+                            if status_line_visible {
+                                clear_status_line(&mut stdout)?;
                             }
+                            // Final fetch to catch any remaining output
+                            if let Ok(final_chunk) = client
+                                .fetch_private_output_range(
+                                    job_number,
+                                    task_index,
+                                    step_id,
+                                    byte_offset,
+                                )
+                                .await
+                            {
+                                if !final_chunk.data.is_empty() {
+                                    write_with_crlf(&mut stdout, &final_chunk.data)?;
+                                }
+                            }
+                            write!(
+                                stdout,
+                                "\r\n--- {} [{}] ---\r\n",
+                                step.name, status
+                            )?;
+                            stdout.flush()?;
+                            break;
                         }
-                        write!(stdout, "\r\n--- {} [{}] ---\r\n", step.name, status)?;
-                        stdout.flush()?;
-                        break;
                     }
+                }
+                Err(e) => {
+                    eprintln!("Warning: status check failed: {e}");
                 }
             }
         }

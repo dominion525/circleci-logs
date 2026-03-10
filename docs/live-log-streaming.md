@@ -77,10 +77,10 @@ header (defaults to 1 second if the header is missing).
 In `stream_log`, transient fetch errors trigger adaptive backoff:
 
 1. First error: `poll_interval_ms` jumps from 950 ms to 3,000 ms
-2. Second error: increases to 5,000 ms
-3. Third consecutive error: streaming stops with a message
+2. Subsequent errors: increases to 5,000 ms
+3. After 30 seconds of consecutive errors: streaming stops with a message
 
-When a successful fetch occurs, the interval resets to 950 ms.
+When a successful fetch occurs, the interval and error timer reset.
 
 ## Raw mode
 
@@ -122,7 +122,7 @@ escape sequences, so 0x0A (LF) never appears inside a sequence.
 | Condition                     | Behavior                                        |
 |-------------------------------|-------------------------------------------------|
 | Step finishes during stream   | Final fetch, print status line, exit loop        |
-| 3 consecutive fetch errors    | Print error message, exit loop                   |
+| 30s of consecutive fetch errors | Print error message, exit loop                 |
 | User presses Esc or q         | Exit stream, show post-log menu                  |
 | User presses Ctrl+C           | Exit stream and program immediately              |
 | `build_num` is `None`         | Falls back to job number 0 (defensive)           |
