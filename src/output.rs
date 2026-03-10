@@ -602,8 +602,16 @@ mod tests {
         let result_plain = render_log(input, false);
         let result_color = render_log(input, true);
         // Should not contain literal ^@ from NUL cells
-        assert!(!result_plain.contains("^@"), "plain contains ^@: {:?}", result_plain);
-        assert!(!result_color.contains("^@"), "color contains ^@: {:?}", result_color);
+        assert!(
+            !result_plain.contains("^@"),
+            "plain contains ^@: {:?}",
+            result_plain
+        );
+        assert!(
+            !result_color.contains("^@"),
+            "color contains ^@: {:?}",
+            result_color
+        );
         assert!(result_plain.contains("Bundle complete!"));
     }
 

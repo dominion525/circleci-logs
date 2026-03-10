@@ -739,9 +739,7 @@ async fn stream_log(
             polls_since_status_check = 0;
             match client.fetch_job_detail(job_number).await {
                 Ok(refreshed) => {
-                    if let Some(status) =
-                        find_action_status(&refreshed, step_index, node_index)
-                    {
+                    if let Some(status) = find_action_status(&refreshed, step_index, node_index) {
                         if is_step_finished(&status) {
                             // Final fetch to catch any remaining output
                             if let Ok(final_chunk) = client
@@ -1743,8 +1741,7 @@ mod tests {
         let mut parser = vt100::Parser::new(u16::MAX, 80, 0);
         let mut last_row = 0u16;
         let mut buf = Vec::new();
-        let printed =
-            render_vt100_rows(&mut buf, &mut parser, &mut last_row, 80, b"").unwrap();
+        let printed = render_vt100_rows(&mut buf, &mut parser, &mut last_row, 80, b"").unwrap();
         assert_eq!(printed, 0);
         assert!(buf.is_empty());
     }
