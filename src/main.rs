@@ -61,7 +61,7 @@ struct Cli {
     failed_only: bool,
 
     /// Output SKILL.md content for AI agent integration
-    #[arg(long)]
+    #[arg(long, visible_alias = "export-skill")]
     help_skill: bool,
 
     /// CircleCI URL (e.g. https://app.circleci.com/pipelines/github/org/repo/123/workflows/UUID/jobs/456)
